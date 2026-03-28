@@ -1,5 +1,7 @@
 # simple-vc-lib
-**simple-vc-lib** is a multi-language library that provides an agnostic wrapper around common version control systems for game development tools. It lets your tools create, edit, and delete files without needing to know or care which version control system the user has in place.
+**simple-vc-lib** is a multi-language library that provides an agnostic wrapper around common version control systems for tools. It lets your tools create, edit, and delete files without needing to know or care which version control system the user has in place.
+
+I wrote this for game dev tooling, but it might be useful for your other projects.
 
 ```javascript
 import { prepareToWrite, finishedWrite, deleteFile } from './simpleVcLib.js';
