@@ -35,7 +35,7 @@ export class SvnProvider {
 
     // File is read-only — only expected for files with svn:needs-lock set.
     if (!isTracked(filePath)) {
-      return errorResult('error', `Cannot make file writable: ${filePath}`);
+      return errorResult('error', `Cannot make '${filePath}' writable`);
     }
 
     const result = svn(['lock', filePath]);
@@ -43,23 +43,23 @@ export class SvnProvider {
 
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('locked by') || combined.includes('steal lock')) {
-      return errorResult('locked', `File is locked by another user: ${result.error || result.output}`);
+      return errorResult('locked', `'${filePath}' is locked by another user`);
     }
     if (combined.includes('out of date')) {
-      return errorResult('outOfDate', `File is out of date — update before locking: ${result.error || result.output}`);
+      return errorResult('outOfDate', `'${filePath}' is out of date — update before locking`);
     }
-    return errorResult('error', `svn lock failed: ${result.error || result.output}`);
+    return errorResult('error', `Cannot lock '${filePath}' in SVN: ${result.error || result.output}`);
   }
 
   finishedWrite(filePath) {
     if (!existsSync(filePath))
-      return errorResult('error', `File does not exist after write: ${filePath}`);
+      return errorResult('error', `'${filePath}' does not exist after write`);
 
     if (isTracked(filePath)) return okResult();
 
     const result = svn(['add', filePath]);
     if (result.exitCode === 0) return okResult('File added to SVN');
-    return errorResult('error', `svn add failed: ${result.error || result.output}`);
+    return errorResult('error', `Cannot add '${filePath}' to SVN: ${result.error || result.output}`);
   }
 
   deleteFile(filePath) {
@@ -68,7 +68,7 @@ export class SvnProvider {
     if (isTracked(filePath)) {
       const result = svn(['delete', '--force', filePath]);
       if (result.exitCode === 0) return okResult();
-      return errorResult('error', `svn delete failed: ${result.error || result.output}`);
+      return errorResult('error', `Cannot delete '${filePath}' from SVN: ${result.error || result.output}`);
     }
 
     try {
@@ -85,7 +85,7 @@ export class SvnProvider {
     if (isTracked(folderPath)) {
       const result = svn(['delete', '--force', folderPath]);
       if (result.exitCode !== 0) {
-        return errorResult('error', `svn delete failed: ${result.error || result.output}`);
+        return errorResult('error', `Cannot delete folder '${folderPath}' from SVN: ${result.error || result.output}`);
       }
     } else {
       try {

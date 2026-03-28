@@ -41,23 +41,23 @@ export class PlasticProvider {
 
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('locked') || combined.includes('exclusive')) {
-      return errorResult('locked', `File is locked: ${result.error || result.output}`);
+      return errorResult('locked', `'${filePath}' is locked`);
     }
     if (combined.includes('out of date') || combined.includes('not latest')) {
-      return errorResult('outOfDate', `File is out of date — update before editing: ${result.error || result.output}`);
+      return errorResult('outOfDate', `'${filePath}' is out of date — update before editing`);
     }
-    return errorResult('error', `cm co failed: ${result.error || result.output}`);
+    return errorResult('error', `Cannot check out '${filePath}': ${result.error || result.output}`);
   }
 
   finishedWrite(filePath) {
     if (!existsSync(filePath))
-      return errorResult('error', `File does not exist after write: ${filePath}`);
+      return errorResult('error', `'${filePath}' does not exist after write`);
 
     if (isTracked(filePath)) return okResult();
 
     const result = cm(['add', filePath]);
     if (result.exitCode === 0) return okResult('File added to Plastic SCM');
-    return errorResult('error', `cm add failed: ${result.error || result.output}`);
+    return errorResult('error', `Cannot add '${filePath}' to Plastic SCM: ${result.error || result.output}`);
   }
 
   deleteFile(filePath) {
@@ -66,14 +66,14 @@ export class PlasticProvider {
     if (isTracked(filePath)) {
       const result = cm(['remove', filePath]);
       if (result.exitCode === 0) return okResult();
-      return errorResult('error', `cm remove failed: ${result.error || result.output}`);
+      return errorResult('error', `Cannot delete '${filePath}' from Plastic SCM: ${result.error || result.output}`);
     }
 
     try {
       unlinkSync(filePath);
       return okResult();
     } catch (e) {
-      return errorResult('error', `Failed to delete file: ${e.message}`);
+      return errorResult('error', `Cannot delete '${filePath}': ${e.message}`);
     }
   }
 
@@ -84,7 +84,7 @@ export class PlasticProvider {
       // cm remove is recursive for directories.
       const result = cm(['remove', folderPath]);
       if (result.exitCode !== 0) {
-        return errorResult('error', `cm remove failed: ${result.error || result.output}`);
+        return errorResult('error', `Cannot delete folder '${folderPath}' from Plastic SCM: ${result.error || result.output}`);
       }
     }
 
@@ -92,7 +92,7 @@ export class PlasticProvider {
       try {
         rmSync(folderPath, { recursive: true, force: true });
       } catch (e) {
-        return errorResult('error', `Failed to delete folder: ${e.message}`);
+        return errorResult('error', `Cannot delete folder '${folderPath}': ${e.message}`);
       }
     }
 

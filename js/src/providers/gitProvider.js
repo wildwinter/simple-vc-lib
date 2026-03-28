@@ -52,13 +52,13 @@ export class GitProvider {
 
   finishedWrite(filePath) {
     if (!existsSync(filePath))
-      return errorResult('error', `File does not exist after write: ${filePath}`);
+      return errorResult('error', `'${filePath}' does not exist after write`);
 
     if (isTracked(filePath)) return okResult();
 
     const result = git(['add', filePath], dirname(filePath));
     if (result.exitCode === 0) return okResult('File added to git');
-    return errorResult('error', `git add failed: ${result.error || result.output}`);
+    return errorResult('error', `Cannot add '${filePath}' to git: ${result.error || result.output}`);
   }
 
   deleteFile(filePath) {
@@ -67,7 +67,7 @@ export class GitProvider {
     if (isTracked(filePath)) {
       const result = git(['rm', '--force', filePath], dirname(filePath));
       if (result.exitCode === 0) return okResult();
-      return errorResult('error', `git rm failed: ${result.error || result.output}`);
+      return errorResult('error', `Cannot delete '${filePath}' from git: ${result.error || result.output}`);
     }
 
     try {
@@ -85,7 +85,7 @@ export class GitProvider {
     if (listResult.exitCode === 0 && listResult.output.length > 0) {
       const rmResult = git(['rm', '-r', '--force', folderPath], folderPath);
       if (rmResult.exitCode !== 0) {
-        return errorResult('error', `git rm -r failed: ${rmResult.error || rmResult.output}`);
+        return errorResult('error', `Cannot delete folder '${folderPath}' from git: ${rmResult.error || rmResult.output}`);
       }
     }
 
@@ -94,7 +94,7 @@ export class GitProvider {
       try {
         rmSync(folderPath, { recursive: true, force: true });
       } catch (e) {
-        return errorResult('error', `Failed to delete folder: ${e.message}`);
+        return errorResult('error', `Cannot delete folder '${folderPath}': ${e.message}`);
       }
     }
 

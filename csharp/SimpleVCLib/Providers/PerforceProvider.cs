@@ -22,26 +22,24 @@ public class PerforceProvider : IVCProvider
 
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
         if (combined.Contains("locked by"))
-            return VCResult.Failure(VCStatus.Locked,
-                $"File is locked by another user: {result.Error ?? result.Output}");
+            return VCResult.Failure(VCStatus.Locked, $"'{filePath}' is locked by another user");
         if (combined.Contains("out of date"))
-            return VCResult.Failure(VCStatus.OutOfDate,
-                $"File is out of date — sync before editing: {result.Error ?? result.Output}");
+            return VCResult.Failure(VCStatus.OutOfDate, $"'{filePath}' is out of date — sync before editing");
 
-        return VCResult.Error($"p4 edit failed: {result.Error ?? result.Output}");
+        return VCResult.Error($"Cannot open '{filePath}' for editing: {result.Error ?? result.Output}");
     }
 
     public VCResult FinishedWrite(string filePath)
     {
         if (!File.Exists(filePath))
-            return VCResult.Error($"File does not exist after write: {filePath}");
+            return VCResult.Error($"'{filePath}' does not exist after write");
 
         var fstat = Fstat(filePath);
         if (fstat is not null) return VCResult.Ok();
 
         var result = P4(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File opened for add in Perforce");
-        return VCResult.Error($"p4 add failed: {result.Error ?? result.Output}");
+        return VCResult.Error($"Cannot add '{filePath}' to Perforce: {result.Error ?? result.Output}");
     }
 
     public VCResult DeleteFile(string filePath)
@@ -52,7 +50,7 @@ public class PerforceProvider : IVCProvider
         {
             var result = P4(["delete", filePath]);
             if (result.ExitCode == 0) return VCResult.Ok();
-            return VCResult.Error($"p4 delete failed: {result.Error ?? result.Output}");
+            return VCResult.Error($"Cannot delete '{filePath}' from Perforce: {result.Error ?? result.Output}");
         }
 
         return _fs.DeleteFile(filePath);

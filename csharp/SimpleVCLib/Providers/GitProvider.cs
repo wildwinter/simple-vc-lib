@@ -18,13 +18,13 @@ public class GitProvider : IVCProvider
     public VCResult FinishedWrite(string filePath)
     {
         if (!File.Exists(filePath))
-            return VCResult.Error($"File does not exist after write: {filePath}");
+            return VCResult.Error($"'{filePath}' does not exist after write");
 
         if (IsTracked(filePath)) return VCResult.Ok();
 
         var result = Git(["add", filePath], Path.GetDirectoryName(filePath)!);
         if (result.ExitCode == 0) return VCResult.Ok("File added to git");
-        return VCResult.Error($"git add failed: {result.Error ?? result.Output}");
+        return VCResult.Error($"Cannot add '{filePath}' to git: {result.Error ?? result.Output}");
     }
 
     public VCResult DeleteFile(string filePath)
@@ -35,7 +35,7 @@ public class GitProvider : IVCProvider
         {
             var result = Git(["rm", "--force", filePath], Path.GetDirectoryName(filePath)!);
             if (result.ExitCode == 0) return VCResult.Ok();
-            return VCResult.Error($"git rm failed: {result.Error ?? result.Output}");
+            return VCResult.Error($"Cannot delete '{filePath}' from git: {result.Error ?? result.Output}");
         }
 
         return _fs.DeleteFile(filePath);
@@ -50,7 +50,7 @@ public class GitProvider : IVCProvider
         {
             var rmResult = Git(["rm", "-r", "--force", folderPath], folderPath);
             if (rmResult.ExitCode != 0)
-                return VCResult.Error($"git rm -r failed: {rmResult.Error ?? rmResult.Output}");
+                return VCResult.Error($"Cannot delete folder '{folderPath}' from git: {rmResult.Error ?? rmResult.Output}");
         }
 
         // Delete any remaining untracked files git rm left behind.

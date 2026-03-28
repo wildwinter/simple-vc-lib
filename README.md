@@ -167,13 +167,7 @@ import { prepareToWrite, finishedWrite, deleteFile, deleteFolder } from './simpl
 
 const prep = prepareToWrite('/path/to/myfile.json');
 if (!prep.success) {
-    if (prep.status === 'locked') {
-        console.error('File is locked by someone else:', prep.message);
-    } else if (prep.status === 'outOfDate') {
-        console.error('File needs syncing first:', prep.message);
-    } else {
-        console.error('Could not open file for editing:', prep.message);
-    }
+    console.error(prep.message); // e.g. "'myfile.json' is locked by another user"
     process.exit(1);
 }
 
@@ -181,7 +175,7 @@ if (!prep.success) {
 
 const add = finishedWrite('/path/to/myfile.json');
 if (!add.success) {
-    console.error('Could not add file to VC:', add.message);
+    console.error(add.message);
 }
 ```
 
@@ -200,18 +194,7 @@ using SimpleVCLib;
 var prep = VCLib.PrepareToWrite("/path/to/myfile.json");
 if (!prep.Success)
 {
-    switch (prep.Status)
-    {
-        case VCStatus.Locked:
-            Console.WriteLine($"File is locked by someone else: {prep.Message}");
-            break;
-        case VCStatus.OutOfDate:
-            Console.WriteLine($"File needs syncing first: {prep.Message}");
-            break;
-        default:
-            Console.WriteLine($"Could not open file for editing: {prep.Message}");
-            break;
-    }
+    Console.WriteLine(prep.Message); // e.g. "'myfile.json' is locked by another user"
     return;
 }
 
@@ -220,12 +203,12 @@ if (!prep.Success)
 // After writing
 var add = VCLib.FinishedWrite("/path/to/myfile.json");
 if (!add.Success)
-    Console.WriteLine($"Could not add file to VC: {add.Message}");
+    Console.WriteLine(add.Message);
 
 // Deleting a folder
 var del = VCLib.DeleteFolder("/path/to/old-content/");
 if (!del.Success)
-    Console.WriteLine($"Could not delete folder: {del.Message}");
+    Console.WriteLine(del.Message);
 ```
 
 ## Contributors

@@ -22,25 +22,23 @@ public class PlasticProvider : IVCProvider
 
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
         if (combined.Contains("locked") || combined.Contains("exclusive"))
-            return VCResult.Failure(VCStatus.Locked,
-                $"File is locked: {result.Error ?? result.Output}");
+            return VCResult.Failure(VCStatus.Locked, $"'{filePath}' is locked");
         if (combined.Contains("out of date") || combined.Contains("not latest"))
-            return VCResult.Failure(VCStatus.OutOfDate,
-                $"File is out of date — update before editing: {result.Error ?? result.Output}");
+            return VCResult.Failure(VCStatus.OutOfDate, $"'{filePath}' is out of date — update before editing");
 
-        return VCResult.Error($"cm co failed: {result.Error ?? result.Output}");
+        return VCResult.Error($"Cannot check out '{filePath}': {result.Error ?? result.Output}");
     }
 
     public VCResult FinishedWrite(string filePath)
     {
         if (!File.Exists(filePath))
-            return VCResult.Error($"File does not exist after write: {filePath}");
+            return VCResult.Error($"'{filePath}' does not exist after write");
 
         if (IsTracked(filePath)) return VCResult.Ok();
 
         var result = Cm(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File added to Plastic SCM");
-        return VCResult.Error($"cm add failed: {result.Error ?? result.Output}");
+        return VCResult.Error($"Cannot add '{filePath}' to Plastic SCM: {result.Error ?? result.Output}");
     }
 
     public VCResult DeleteFile(string filePath)
@@ -51,7 +49,7 @@ public class PlasticProvider : IVCProvider
         {
             var result = Cm(["remove", filePath]);
             if (result.ExitCode == 0) return VCResult.Ok();
-            return VCResult.Error($"cm remove failed: {result.Error ?? result.Output}");
+            return VCResult.Error($"Cannot delete '{filePath}' from Plastic SCM: {result.Error ?? result.Output}");
         }
 
         return _fs.DeleteFile(filePath);
@@ -65,7 +63,7 @@ public class PlasticProvider : IVCProvider
         {
             var result = Cm(["remove", folderPath]);
             if (result.ExitCode != 0)
-                return VCResult.Error($"cm remove failed: {result.Error ?? result.Output}");
+                return VCResult.Error($"Cannot delete folder '{folderPath}' from Plastic SCM: {result.Error ?? result.Output}");
         }
 
         if (Directory.Exists(folderPath))

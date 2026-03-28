@@ -23,14 +23,14 @@ public class FilesystemProvider : IVCProvider
         }
         catch (Exception ex)
         {
-            return VCResult.Error($"Cannot make file writable: {ex.Message}");
+            return VCResult.Error($"Cannot make '{filePath}' writable: {ex.Message}");
         }
     }
 
     public VCResult FinishedWrite(string filePath)
     {
         if (!File.Exists(filePath))
-            return VCResult.Error($"File does not exist after write: {filePath}");
+            return VCResult.Error($"'{filePath}' does not exist after write");
         return VCResult.Ok();
     }
 
@@ -44,7 +44,7 @@ public class FilesystemProvider : IVCProvider
         }
         catch (Exception ex)
         {
-            return VCResult.Error($"Failed to delete file: {ex.Message}");
+            return VCResult.Error($"Cannot delete '{filePath}': {ex.Message}");
         }
     }
 
@@ -58,7 +58,7 @@ public class FilesystemProvider : IVCProvider
         }
         catch (Exception ex)
         {
-            return VCResult.Error($"Failed to delete folder: {ex.Message}");
+            return VCResult.Error($"Cannot delete folder '{folderPath}': {ex.Message}");
         }
     }
 }

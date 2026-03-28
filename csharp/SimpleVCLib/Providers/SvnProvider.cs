@@ -19,32 +19,30 @@ public class SvnProvider : IVCProvider
 
         // File is read-only — only expected for files with svn:needs-lock set.
         if (!IsTracked(filePath))
-            return VCResult.Error($"Cannot make file writable: {filePath}");
+            return VCResult.Error($"Cannot make '{filePath}' writable");
 
         var result = Svn(["lock", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File locked in SVN");
 
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
         if (combined.Contains("locked by") || combined.Contains("steal lock"))
-            return VCResult.Failure(VCStatus.Locked,
-                $"File is locked by another user: {result.Error ?? result.Output}");
+            return VCResult.Failure(VCStatus.Locked, $"'{filePath}' is locked by another user");
         if (combined.Contains("out of date"))
-            return VCResult.Failure(VCStatus.OutOfDate,
-                $"File is out of date — update before locking: {result.Error ?? result.Output}");
+            return VCResult.Failure(VCStatus.OutOfDate, $"'{filePath}' is out of date — update before locking");
 
-        return VCResult.Error($"svn lock failed: {result.Error ?? result.Output}");
+        return VCResult.Error($"Cannot lock '{filePath}' in SVN: {result.Error ?? result.Output}");
     }
 
     public VCResult FinishedWrite(string filePath)
     {
         if (!File.Exists(filePath))
-            return VCResult.Error($"File does not exist after write: {filePath}");
+            return VCResult.Error($"'{filePath}' does not exist after write");
 
         if (IsTracked(filePath)) return VCResult.Ok();
 
         var result = Svn(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File added to SVN");
-        return VCResult.Error($"svn add failed: {result.Error ?? result.Output}");
+        return VCResult.Error($"Cannot add '{filePath}' to SVN: {result.Error ?? result.Output}");
     }
 
     public VCResult DeleteFile(string filePath)
@@ -55,7 +53,7 @@ public class SvnProvider : IVCProvider
         {
             var result = Svn(["delete", "--force", filePath]);
             if (result.ExitCode == 0) return VCResult.Ok();
-            return VCResult.Error($"svn delete failed: {result.Error ?? result.Output}");
+            return VCResult.Error($"Cannot delete '{filePath}' from SVN: {result.Error ?? result.Output}");
         }
 
         return _fs.DeleteFile(filePath);
@@ -69,7 +67,7 @@ public class SvnProvider : IVCProvider
         {
             var result = Svn(["delete", "--force", folderPath]);
             if (result.ExitCode != 0)
-                return VCResult.Error($"svn delete failed: {result.Error ?? result.Output}");
+                return VCResult.Error($"Cannot delete folder '{folderPath}' from SVN: {result.Error ?? result.Output}");
             return VCResult.Ok();
         }
 

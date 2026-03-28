@@ -13,7 +13,7 @@ function isWritable(filePath) {
 function makeWritable(filePath) {
   try {
     const mode = statSync(filePath).mode;
-    chmodSync(filePath, mode | 0o200); // Add owner-write bit.
+    chmodSync(filePath, mode | 0o200); // Adds owner-write bit.
     return isWritable(filePath);
   } catch {
     return false;
@@ -31,12 +31,12 @@ export class FilesystemProvider {
     if (!existsSync(filePath)) return okResult();
     if (isWritable(filePath)) return okResult();
     if (makeWritable(filePath)) return okResult('File made writable');
-    return errorResult('error', `Cannot make file writable: ${filePath}`);
+    return errorResult('error', `Cannot make '${filePath}' writable`);
   }
 
   finishedWrite(filePath) {
     if (!existsSync(filePath))
-      return errorResult('error', `File does not exist after write: ${filePath}`);
+      return errorResult('error', `'${filePath}' does not exist after write`);
     return okResult();
   }
 
@@ -46,7 +46,7 @@ export class FilesystemProvider {
       unlinkSync(filePath);
       return okResult();
     } catch (e) {
-      return errorResult('error', `Failed to delete file: ${e.message}`);
+      return errorResult('error', `Cannot delete '${filePath}': ${e.message}`);
     }
   }
 
@@ -56,7 +56,7 @@ export class FilesystemProvider {
       rmSync(folderPath, { recursive: true, force: true });
       return okResult();
     } catch (e) {
-      return errorResult('error', `Failed to delete folder: ${e.message}`);
+      return errorResult('error', `Cannot delete folder '${folderPath}': ${e.message}`);
     }
   }
 }
