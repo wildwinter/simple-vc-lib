@@ -1,7 +1,7 @@
 import { resolve, dirname } from 'path';
 import { statSync } from 'fs';
 import { loadConfig } from './config.js';
-import { detectProvider } from './detector.js';
+import { detectProvider, clearDetectorCache } from './detector.js';
 import { GitProvider } from './providers/gitProvider.js';
 import { PerforceProvider } from './providers/perforceProvider.js';
 import { PlasticProvider } from './providers/plasticProvider.js';
@@ -33,6 +33,7 @@ export function setProvider(provider) {
 /** Clear any previously set provider override, restoring auto-detection. */
 export function clearProvider() {
   _overrideProvider = null;
+  clearDetectorCache();
 }
 
 function dirOf(p) {

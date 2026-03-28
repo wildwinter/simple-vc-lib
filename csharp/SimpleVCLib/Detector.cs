@@ -10,6 +10,13 @@ public static class Detector
     private static readonly string[] ValidSystems =
         ["git", "perforce", "plastic", "svn", "filesystem"];
 
+    // Maps a VCS root directory to its provider instance.
+    // Populated on first detection; avoids repeated directory walks for the same repo.
+    private static readonly Dictionary<string, IVCProvider> _rootCache = new();
+
+    /// <summary>Clear the detection cache. Called when the provider override is cleared.</summary>
+    public static void ClearCache() => _rootCache.Clear();
+
     /// <summary>
     /// Detect and return the appropriate provider for <paramref name="path"/>.
     /// <para>
@@ -48,18 +55,41 @@ public static class Detector
             dir = parent;
         }
 
+        // Check whether any ancestor is a known VCS root before doing any I/O.
+        dir = startDir;
+        while (dir is not null)
+        {
+            if (_rootCache.TryGetValue(dir, out var cached)) return cached;
+            var parent = Path.GetDirectoryName(dir);
+            if (parent == dir) break;
+            dir = parent;
+        }
+
+        // Walk up looking for VC marker directories/files.
         dir = startDir;
         while (dir is not null)
         {
             if (Directory.Exists(Path.Combine(dir, ".git")) ||
                 File.Exists(Path.Combine(dir, ".git")))          // git worktrees use a file
-                return new GitProvider();
+            {
+                var p = new GitProvider();
+                _rootCache[dir] = p;
+                return p;
+            }
 
             if (Directory.Exists(Path.Combine(dir, ".plastic")))
-                return new PlasticProvider();
+            {
+                var p = new PlasticProvider();
+                _rootCache[dir] = p;
+                return p;
+            }
 
             if (Directory.Exists(Path.Combine(dir, ".svn")))
-                return new SvnProvider();
+            {
+                var p = new SvnProvider();
+                _rootCache[dir] = p;
+                return p;
+            }
 
             var parent = Path.GetDirectoryName(dir);
             if (parent == dir) break;

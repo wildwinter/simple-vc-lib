@@ -19,8 +19,11 @@ public static class VCLib
     /// <summary>
     /// Clear any provider override, restoring auto-detection.
     /// </summary>
-    public static void ClearProvider() =>
+    public static void ClearProvider()
+    {
         _overrideProvider = null;
+        Detector.ClearCache();
+    }
 
     /// <summary>
     /// Return the provider that would be used for <paramref name="path"/>.

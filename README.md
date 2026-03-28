@@ -135,6 +135,8 @@ The library detects the active VC system automatically, in this order:
 4. **Perforce** — runs `p4 info` to check whether a Perforce workspace is configured.
 5. **Filesystem fallback** — if nothing is detected, the library operates on plain files with no VC interaction. Read-only files are still handled by removing the read-only attribute.
 
+Detection results are cached by VCS root directory. After the first operation on a file inside a repo, subsequent operations on files in the same repo skip the directory walk entirely. Files outside any known VCS root (for example, writing to a temp directory) are detected independently and will use the filesystem fallback without affecting the cache.
+
 ### Overriding VC Detection
 If auto-detection is unreliable in your environment, you can also force a specific provider in code:
 
