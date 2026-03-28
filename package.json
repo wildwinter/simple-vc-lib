@@ -1,0 +1,19 @@
+{
+  "name": "simple-vc-lib",
+  "version": "0.0.1",
+  "description": "An agnostic version control wrapper library for game development tools.",
+  "scripts": {
+    "clean": "npm run clean:js && npm run clean:cs",
+    "clean:js": "cd js && npm run clean",
+    "clean:cs": "cd csharp && npm run clean",
+    "build": "npm run build:js && npm run build:cs",
+    "build:js": "cd js && npm run build",
+    "build:cs": "cd csharp && npm run build",
+    "test": "npm run test:js && npm run test:cs",
+    "test:js": "cd js && npm test",
+    "test:cs": "cd csharp && npm test",
+    "pack": "rm -rf ./dist/v$npm_package_version && npm run pack:js && npm run pack:cs",
+    "pack:js": "cd js && npm run pack",
+    "pack:cs": "cd csharp && npm run pack"
+  }
+}

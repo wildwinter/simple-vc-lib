@@ -1,0 +1,101 @@
+import { existsSync, unlinkSync, rmSync } from 'fs';
+import { runCommand } from '../commandRunner.js';
+import { okResult, errorResult } from '../vcResult.js';
+import { FilesystemProvider } from './filesystemProvider.js';
+
+const fs = new FilesystemProvider();
+
+function cm(args) {
+  return runCommand('cm', args);
+}
+
+/**
+ * Returns true if the file is tracked by Plastic SCM (Unity Version Control).
+ */
+function isTracked(filePath) {
+  const result = cm(['status', '--short', filePath]);
+  if (result.exitCode !== 0) return false;
+  // Untracked files are reported with a '?' prefix.
+  const lines = result.output.split('\n').filter(l => l.trim());
+  return lines.length > 0 && !lines[0].startsWith('?');
+}
+
+/**
+ * Plastic SCM / Unity Version Control provider.
+ *
+ * Uses the `cm` CLI (Plastic SCM command-line client).
+ * Files under Plastic SCM are read-only until checked out.
+ */
+export class PlasticProvider {
+  get name() { return 'plastic'; }
+
+  prepareToWrite(filePath) {
+    if (!existsSync(filePath)) return okResult();
+
+    if (!isTracked(filePath)) {
+      return fs.prepareToWrite(filePath);
+    }
+
+    const result = cm(['co', filePath]);
+    if (result.exitCode === 0) return okResult();
+
+    const combined = (result.output + ' ' + result.error).toLowerCase();
+    if (combined.includes('locked') || combined.includes('exclusive')) {
+      return errorResult('locked', `File is locked: ${result.error || result.output}`);
+    }
+    if (combined.includes('out of date') || combined.includes('not latest')) {
+      return errorResult('outOfDate', `File is out of date — update before editing: ${result.error || result.output}`);
+    }
+    return errorResult('error', `cm co failed: ${result.error || result.output}`);
+  }
+
+  finishedWrite(filePath) {
+    if (!existsSync(filePath))
+      return errorResult('error', `File does not exist after write: ${filePath}`);
+
+    if (isTracked(filePath)) return okResult();
+
+    const result = cm(['add', filePath]);
+    if (result.exitCode === 0) return okResult('File added to Plastic SCM');
+    return errorResult('error', `cm add failed: ${result.error || result.output}`);
+  }
+
+  deleteFile(filePath) {
+    if (!existsSync(filePath)) return okResult();
+
+    if (isTracked(filePath)) {
+      const result = cm(['remove', filePath]);
+      if (result.exitCode === 0) return okResult();
+      return errorResult('error', `cm remove failed: ${result.error || result.output}`);
+    }
+
+    try {
+      unlinkSync(filePath);
+      return okResult();
+    } catch (e) {
+      return errorResult('error', `Failed to delete file: ${e.message}`);
+    }
+  }
+
+  deleteFolder(folderPath) {
+    if (!existsSync(folderPath)) return okResult();
+
+    if (isTracked(folderPath)) {
+      // cm remove is recursive for directories.
+      const result = cm(['remove', folderPath]);
+      if (result.exitCode !== 0) {
+        return errorResult('error', `cm remove failed: ${result.error || result.output}`);
+      }
+    }
+
+    if (existsSync(folderPath)) {
+      try {
+        rmSync(folderPath, { recursive: true, force: true });
+      } catch (e) {
+        return errorResult('error', `Failed to delete folder: ${e.message}`);
+      }
+    }
+
+    return okResult();
+  }
+}

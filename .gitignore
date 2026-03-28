@@ -1,0 +1,10 @@
+node_modules
+dist
+obj
+bin
+build
+*.user
+.DS_Store
+.vscode
+.claude
+.gemini

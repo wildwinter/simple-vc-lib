@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>SimpleVCLib</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Ian Thomas</Authors>
+    <Company>Storyworlds</Company>
+    <Description>An agnostic version control wrapper library for game development tools.</Description>
+    <PackageTags>versioncontrol;git;perforce;plastic;svn;gamedev</PackageTags>
+  </PropertyGroup>
+</Project>
