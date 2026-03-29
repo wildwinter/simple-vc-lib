@@ -4,19 +4,14 @@
 I wrote this for game dev tooling, but it might be useful for your other projects.
 
 ```javascript
-import { prepareToWrite, finishedWrite, deleteFile } from './simpleVcLib.js';
+import { writeTextFile, deleteFile } from './simpleVcLib.js';
 
-// Before writing - checks out the file if needed, removes read-only flag
-const prep = prepareToWrite('/path/to/dialogue.json');
-if (!prep.success) {
-    console.error(prep.message); // e.g. "File is locked by another user"
+// Write a file - checks out if needed, writes, adds to VC if new
+const result = writeTextFile('/path/to/dialogue.json', JSON.stringify(data));
+if (!result.success) {
+    console.error(result.message); // e.g. "File is locked by another user"
     process.exit(1);
 }
-
-// ... write your file however you like ...
-
-// After writing - adds to VC if it's a new file
-finishedWrite('/path/to/dialogue.json');
 
 // Deleting - marks for deletion in VC if tracked
 deleteFile('/path/to/old-dialogue.json');
@@ -25,17 +20,12 @@ deleteFile('/path/to/old-dialogue.json');
 ```csharp
 using SimpleVCLib;
 
-// Before writing
-var prep = VCLib.PrepareToWrite("/path/to/dialogue.json");
-if (!prep.Success) {
-    Console.WriteLine(prep.Message); // e.g. "File is locked by another user"
+// Write a file - checks out if needed, writes, adds to VC if new
+var result = VCLib.WriteTextFile("/path/to/dialogue.json", jsonContent);
+if (!result.Success) {
+    Console.WriteLine(result.Message); // e.g. "File is locked by another user"
     return;
 }
-
-// ... write your file however you like ...
-
-// After writing
-VCLib.FinishedWrite("/path/to/dialogue.json");
 
 // Deleting
 VCLib.DeleteFile("/path/to/old-dialogue.json");
@@ -56,6 +46,7 @@ VCLib.DeleteFile("/path/to/old-dialogue.json");
     * [C#](#c)
 * [Contributors](#contributors)
 * [License](#license)
+
 
 ## What it does
 Game development tools often create, modify, or delete content files — dialogue JSON, audio files, configuration — while the project is under version control. If a file is checked in to Perforce or Plastic SCM it will typically be read-only until checked out, and new files need to be explicitly added.
@@ -86,17 +77,27 @@ The library calls the relevant CLI under the hood. The appropriate CLI tool must
 ## Usage
 
 ### Overview
-* Call **`prepareToWrite`** before you write to a file. If the file doesn't yet exist, this is a no-op. If it exists and is read-only (e.g. checked in to Perforce), it will be checked out / unlocked. If it can't be made writable, you get a failure result.
-* Write the file using whatever mechanism you prefer.
-* Call **`finishedWrite`** after writing. If the file is new and not yet tracked by VC, it will be added. For already-tracked files this is a no-op.
+* Use **`writeTextFile`** or **`writeBinaryFile`** to write a file. These all-in-one helpers check out or unlock the file if needed, write it, and add it to VC if it's new. Works whether or not the file already exists.
+* If you need finer control, the steps are also available individually: call **`prepareToWrite`** before writing (checks out / unlocks the file, or no-ops if it doesn't exist yet), then write the file yourself, then call **`finishedWrite`** afterwards (adds the file to VC if it's new).
 * Call **`deleteFile`** or **`deleteFolder`** to remove files. Tracked files will be marked for deletion in the VC system; untracked files are just deleted from disk.
 
 You don't need to tell the library which VC system is in use — it detects this automatically. See [VC Detection](#vc-detection) below.
 
 ### Operations
 
+#### `writeTextFile(filePath, content, encoding)`
+An all-in-one helper that calls `prepareToWrite`, writes `content` as text, then calls `finishedWrite`. Works whether or not the file already exists.
+
+- `encoding` defaults to UTF-8 (without BOM).
+- Returns the result from whichever step failed, or the result of `finishedWrite` on success.
+
+#### `writeBinaryFile(filePath, data)`
+An all-in-one helper that calls `prepareToWrite`, writes `data` as raw bytes, then calls `finishedWrite`. Works whether or not the file already exists.
+
+- Returns the result from whichever step failed, or the result of `finishedWrite` on success.
+
 #### `prepareToWrite(filePath)`
-Prepares a file path for writing.
+Prepares a file path for writing. Use this when you need to write the file yourself rather than via `writeTextFile` / `writeBinaryFile`.
 - If the file does not yet exist: succeeds immediately (ready to create).
 - If the file exists and is writable: succeeds immediately.
 - If the file exists and is read-only: checks it out (Perforce, Plastic SCM, SVN) or removes the read-only attribute (Git, filesystem).
@@ -104,7 +105,7 @@ Prepares a file path for writing.
 On failure, the `status` field indicates the reason: `locked` means the file is exclusively held by another user; `outOfDate` means the local copy is behind the depot and needs syncing first.
 
 #### `finishedWrite(filePath)`
-Notifies the library that a file has been written.
+Notifies the library that a file has been written. Use this after writing the file yourself following a `prepareToWrite` call.
 - If the file is newly created (not yet in VC): adds it (`git add`, `p4 add`, `cm add`, `svn add`).
 - If the file was already tracked: no-op.
 
@@ -115,7 +116,7 @@ Deletes a file, scheduling it for deletion in VC if it is tracked.
 Deletes a folder and all its contents. Tracked files are scheduled for VC deletion; untracked files are deleted from disk.
 
 ### Return Values
-All four operations return a result object with three fields:
+All operations return a result object with three fields:
 
 | Field | Type | Description |
 |---|---|---|
@@ -167,16 +168,27 @@ Add `simpleVcLib.js` (ESM) or `simpleVcLib.cjs` (CommonJS) to your project.
 
 ```javascript
 // ESM
-import { prepareToWrite, finishedWrite, deleteFile, deleteFolder } from './simpleVcLib.js';
+import { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite, deleteFile, deleteFolder } from './simpleVcLib.js';
 
-const prep = prepareToWrite('/path/to/myfile.json');
-if (!prep.success) {
-    console.error(prep.message); // e.g. "'myfile.json' is locked by another user"
+// All-in-one helpers (checkout + write + add to VC)
+const result = writeTextFile('/path/to/myfile.json', JSON.stringify(data), 'utf8');
+if (!result.success) {
+    console.error(result.message); // e.g. "'myfile.json' is locked by another user"
     process.exit(1);
 }
 
-// ... write the file ...
+const binResult = writeBinaryFile('/path/to/myfile.bin', buffer);
+if (!binResult.success) {
+    console.error(binResult.message);
+}
 
+// Manual approach — if you need to write the file yourself
+const prep = prepareToWrite('/path/to/myfile.json');
+if (!prep.success) {
+    console.error(prep.message);
+    process.exit(1);
+}
+// ... write the file ...
 const add = finishedWrite('/path/to/myfile.json');
 if (!add.success) {
     console.error(add.message);
@@ -185,7 +197,7 @@ if (!add.success) {
 
 ```javascript
 // CommonJS
-const { prepareToWrite, finishedWrite } = require('./simpleVcLib.cjs');
+const { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite } = require('./simpleVcLib.cjs');
 ```
 
 ### C#
@@ -194,17 +206,28 @@ Add `SimpleVCLib.dll` to your project references.
 ```csharp
 using SimpleVCLib;
 
-// Before writing
+// All-in-one helpers (checkout + write + add to VC)
+var result = VCLib.WriteTextFile("/path/to/myfile.json", jsonContent);
+if (!result.Success)
+    Console.WriteLine(result.Message); // e.g. "'myfile.json' is locked by another user"
+
+// With explicit encoding
+var result2 = VCLib.WriteTextFile("/path/to/myfile.txt", text, System.Text.Encoding.Unicode);
+if (!result2.Success)
+    Console.WriteLine(result2.Message);
+
+var binResult = VCLib.WriteBinaryFile("/path/to/myfile.bin", data);
+if (!binResult.Success)
+    Console.WriteLine(binResult.Message);
+
+// Manual approach — if you need to write the file yourself
 var prep = VCLib.PrepareToWrite("/path/to/myfile.json");
 if (!prep.Success)
 {
-    Console.WriteLine(prep.Message); // e.g. "'myfile.json' is locked by another user"
+    Console.WriteLine(prep.Message);
     return;
 }
-
 // ... write the file ...
-
-// After writing
 var add = VCLib.FinishedWrite("/path/to/myfile.json");
 if (!add.Success)
     Console.WriteLine(add.Message);

@@ -1,5 +1,5 @@
 import { resolve, dirname } from 'path';
-import { statSync } from 'fs';
+import { statSync, writeFileSync } from 'fs';
 import { loadConfig } from './config.js';
 import { detectProvider, clearDetectorCache } from './detector.js';
 import { GitProvider } from './providers/gitProvider.js';
@@ -98,4 +98,47 @@ export function deleteFile(filePath) {
  */
 export function deleteFolder(folderPath) {
   return resolveProvider(folderPath).deleteFolder(folderPath);
+}
+
+/**
+ * Write text to a file, handling VC checkout and registration automatically.
+ * Calls `prepareToWrite`, writes the file, then calls `finishedWrite`.
+ * Works whether or not the file already exists.
+ *
+ * On failure, returns the result from whichever step failed.
+ *
+ * @param {string} filePath
+ * @param {string} content
+ * @param {BufferEncoding} [encoding='utf8']
+ */
+export function writeTextFile(filePath, content, encoding = 'utf8') {
+  const prep = resolveProvider(filePath).prepareToWrite(filePath);
+  if (!prep.success) return prep;
+  try {
+    writeFileSync(filePath, content, { encoding });
+  } catch (e) {
+    return { success: false, status: 'error', message: e.message };
+  }
+  return resolveProvider(filePath).finishedWrite(filePath);
+}
+
+/**
+ * Write binary data to a file, handling VC checkout and registration automatically.
+ * Calls `prepareToWrite`, writes the file, then calls `finishedWrite`.
+ * Works whether or not the file already exists.
+ *
+ * On failure, returns the result from whichever step failed.
+ *
+ * @param {string} filePath
+ * @param {Buffer | Uint8Array} data
+ */
+export function writeBinaryFile(filePath, data) {
+  const prep = resolveProvider(filePath).prepareToWrite(filePath);
+  if (!prep.success) return prep;
+  try {
+    writeFileSync(filePath, data);
+  } catch (e) {
+    return { success: false, status: 'error', message: e.message };
+  }
+  return resolveProvider(filePath).finishedWrite(filePath);
 }
