@@ -60,7 +60,7 @@ The source can be found on [Github](https://github.com/wildwinter/simple-vc-lib)
 * **Javascript** — available on [npm](https://www.npmjs.com/package/@wildwinter/simple-vc-lib) as `@wildwinter/simple-vc-lib`. Includes ESM and CommonJS builds with TypeScript definitions.
 * **C#** — available on [NuGet](https://www.nuget.org/packages/wildwinter.SimpleVCLib) as `wildwinter.SimpleVCLib`. Targets .NET 8.
 
-Both are cross-platform (macOS Arm64 and Windows x64). Zip archives are also available in the [GitHub releases area](https://github.com/wildwinter/simple-vc-lib/releases).
+Both are cross-platform (macOS Arm64 and Windows x64).
 
 ## Supported Version Control Systems
 | System | CLI used | Detection |
