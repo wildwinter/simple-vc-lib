@@ -31,7 +31,7 @@
     "clean": "rm -rf ./dist",
     "build": "npx rollup -c && cp src/index.d.ts dist/simpleVcLib.d.ts && cp ../README.md dist/README.md && cp ../LICENSE dist/LICENSE",
     "test": "npx mocha",
-    "pack": "npm run build && mkdir -p ../dist/v$npm_package_version && rm -rf ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip && zip -r ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip ./dist",
+    "pack": "npm run build && mkdir -p ../dist/v$npm_package_version && rm -rf ../dist/v$npm_package_version/simple-vc-lib-js-v$npm_package_version.zip && zip -r ../dist/v$npm_package_version/simple-vc-lib-js-v$npm_package_version.zip ./dist",
     "publish-npm": "npm run build && cp ../README.md ./README.md && cp ../LICENSE ./LICENSE && npm publish --access public; rm -f ./README.md ./LICENSE"
   },
   "devDependencies": {
