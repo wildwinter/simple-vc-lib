@@ -18,6 +18,62 @@ internal static class TestHelpers
         return dir;
     }
 
+    /// <summary>Returns true if svn and svnadmin are available on this machine.</summary>
+    public static bool SvnAvailable()
+    {
+        static int ExitCode(string exe, string args)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(exe, args)
+                {
+                    RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                };
+                using var p = Process.Start(psi)!;
+                p.WaitForExit();
+                return p.ExitCode;
+            }
+            catch { return -1; }
+        }
+        return ExitCode("svn", "--version --quiet") == 0 &&
+               ExitCode("svnadmin", "--version --quiet") == 0;
+    }
+
+    /// <summary>
+    /// Create a temporary SVN repository and a working copy checked out from it.
+    /// Returns the working-copy path.
+    /// </summary>
+    public static string InitSvnRepo()
+    {
+        static (int exitCode, string output) Run(string exe, string args, string? cwd = null)
+        {
+            var psi = new ProcessStartInfo(exe, args)
+            {
+                WorkingDirectory = cwd ?? Path.GetTempPath(),
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            using var p = Process.Start(psi)!;
+            var output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+            p.WaitForExit();
+            return (p.ExitCode, output);
+        }
+
+        var repoDir = MakeTempDir();
+        var wcDir = MakeTempDir();
+
+        Run("svnadmin", $"create \"{repoDir}\"");
+        Run("svn", $"checkout \"file://{repoDir}\" \"{wcDir}\"");
+
+        // Commit an initial file so the repo has a revision.
+        File.WriteAllText(Path.Combine(wcDir, "initial.txt"), "initial");
+        Run("svn", "add initial.txt", wcDir);
+        Run("svn", "commit -m initial --username test --no-auth-cache", wcDir);
+
+        return wcDir;
+    }
+
     /// <summary>Initialise a bare git repo in <paramref name="dir"/>.</summary>
     public static void InitGitRepo(string dir)
     {
@@ -255,5 +311,123 @@ public class GitProviderTests : IDisposable
         var result = VCLib.DeleteFolder(folderPath);
         Assert.True(result.Success, result.Message);
         Assert.False(Directory.Exists(folderPath));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SvnProvider tests (uses a temporary SVN repository via file:// URL)
+// Skipped automatically when svn/svnadmin are not installed.
+// ---------------------------------------------------------------------------
+
+public class SvnProviderTests : IDisposable
+{
+    private readonly bool _available;
+    private readonly string _wcDir;
+
+    public SvnProviderTests()
+    {
+        _available = TestHelpers.SvnAvailable();
+        _wcDir = _available ? TestHelpers.InitSvnRepo() : string.Empty;
+        if (_available)
+            VCLib.SetProvider(new SvnProvider());
+    }
+
+    public void Dispose()
+    {
+        VCLib.ClearProvider();
+        if (_wcDir != string.Empty && Directory.Exists(_wcDir))
+            Directory.Delete(_wcDir, recursive: true);
+    }
+
+    private static (int ExitCode, string Output) Svn(string args, string cwd)
+    {
+        var psi = new ProcessStartInfo("svn", args)
+        {
+            WorkingDirectory = cwd,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using var p = Process.Start(psi)!;
+        var output = p.StandardOutput.ReadToEnd().Trim();
+        p.WaitForExit();
+        return (p.ExitCode, output);
+    }
+
+    [Fact]
+    public void FinishedWrite_NewFile_AddsToSvn()
+    {
+        if (!_available) return;
+
+        var filePath = Path.Combine(_wcDir, "new.txt");
+        File.WriteAllText(filePath, "hello");
+
+        var result = VCLib.FinishedWrite(filePath);
+        Assert.True(result.Success, result.Message);
+
+        var (_, output) = Svn($"status \"{filePath}\"", _wcDir);
+        Assert.StartsWith("A", output);
+    }
+
+    [Fact]
+    public void FinishedWrite_AlreadyTrackedFile_ReturnsOk()
+    {
+        if (!_available) return;
+
+        // initial.txt was committed in InitSvnRepo.
+        var result = VCLib.FinishedWrite(Path.Combine(_wcDir, "initial.txt"));
+        Assert.True(result.Success);
+    }
+
+    [Fact]
+    public void DeleteFile_CommittedFile_DeletesIt()
+    {
+        if (!_available) return;
+
+        var filePath = Path.Combine(_wcDir, "todelete.txt");
+        File.WriteAllText(filePath, "bye");
+        Svn($"add \"{filePath}\"", _wcDir);
+        Svn("commit -m \"add todelete\" --username test --no-auth-cache", _wcDir);
+
+        var result = VCLib.DeleteFile(filePath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(filePath));
+
+        var (_, output) = Svn($"status \"{filePath}\"", _wcDir);
+        Assert.StartsWith("D", output);
+    }
+
+    [Fact]
+    public void DeleteFolder_CommittedFolder_DeletesIt()
+    {
+        if (!_available) return;
+
+        var dirPath = Path.Combine(_wcDir, "mydir");
+        Directory.CreateDirectory(dirPath);
+        File.WriteAllText(Path.Combine(dirPath, "f.txt"), "x");
+        Svn($"add \"{dirPath}\"", _wcDir);
+        Svn("commit -m \"add mydir\" --username test --no-auth-cache", _wcDir);
+
+        var result = VCLib.DeleteFolder(dirPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(Directory.Exists(dirPath));
+    }
+
+    [Fact]
+    public void AutoDetect_SvnWorkingCopy_UsesSvnProvider()
+    {
+        if (!_available) return;
+
+        VCLib.ClearProvider();  // Remove explicit provider — rely on auto-detection.
+        var filePath = Path.Combine(_wcDir, "detected.txt");
+        File.WriteAllText(filePath, "x");
+
+        var result = VCLib.FinishedWrite(filePath);
+        Assert.True(result.Success, result.Message);
+
+        var (_, output) = Svn($"status \"{filePath}\"", _wcDir);
+        Assert.StartsWith("A", output);
+
+        VCLib.SetProvider(new SvnProvider());  // Restore for remaining tests.
     }
 }

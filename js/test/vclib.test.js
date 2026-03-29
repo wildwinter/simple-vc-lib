@@ -7,7 +7,7 @@ import { spawnSync } from 'child_process';
 import {
   prepareToWrite, finishedWrite, deleteFile, deleteFolder,
   setProvider, clearProvider,
-  GitProvider, FilesystemProvider,
+  GitProvider, FilesystemProvider, SvnProvider,
 } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
@@ -16,6 +16,18 @@ import {
 
 function makeTempDir() {
   return mkdtempSync(join(tmpdir(), 'simple-vc-lib-test-'));
+}
+
+function initSvnRepo() {
+  const repoDir = makeTempDir();
+  const wcDir = makeTempDir();
+  spawnSync('svnadmin', ['create', repoDir], { encoding: 'utf8' });
+  spawnSync('svn', ['checkout', `file://${repoDir}`, wcDir], { encoding: 'utf8' });
+  // Commit an initial file so the repo has a revision.
+  writeFileSync(join(wcDir, 'initial.txt'), 'initial');
+  spawnSync('svn', ['add', 'initial.txt'], { cwd: wcDir, encoding: 'utf8' });
+  spawnSync('svn', ['commit', '-m', 'initial', '--username', 'test', '--no-auth-cache'], { cwd: wcDir, encoding: 'utf8' });
+  return wcDir;
 }
 
 function initGitRepo(dir) {
@@ -209,5 +221,89 @@ describe('GitProvider', () => {
     const result = deleteFolder(folderPath);
     assert.isTrue(result.success, result.message);
     assert.isFalse(existsSync(folderPath));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SvnProvider tests (uses a temporary SVN repository via file:// URL)
+// ---------------------------------------------------------------------------
+
+describe('SvnProvider', function () {
+  // SVN operations can be slower than git — give each test more breathing room.
+  this.timeout(10000);
+
+  let wcDir;
+
+  before(function () {
+    // Skip entire suite if svn tooling is not available.
+    const check = spawnSync('svn', ['--version', '--quiet'], { encoding: 'utf8' });
+    const adminCheck = spawnSync('svnadmin', ['--version', '--quiet'], { encoding: 'utf8' });
+    if (check.status !== 0 || adminCheck.status !== 0) {
+      this.skip();
+    }
+    wcDir = initSvnRepo();
+    setProvider(new SvnProvider());
+  });
+
+  after(() => {
+    clearProvider();
+  });
+
+  it('finishedWrite adds a new file to SVN', () => {
+    const filePath = join(wcDir, 'new.txt');
+    writeFileSync(filePath, 'hello');
+
+    const result = finishedWrite(filePath);
+    assert.isTrue(result.success, result.message);
+
+    const status = spawnSync('svn', ['status', filePath], { encoding: 'utf8' });
+    assert.match(status.stdout.trim(), /^A/);
+  });
+
+  it('finishedWrite on an already-tracked file is a no-op', () => {
+    // initial.txt was committed in initSvnRepo.
+    const result = finishedWrite(join(wcDir, 'initial.txt'));
+    assert.isTrue(result.success);
+  });
+
+  it('deleteFile removes a committed file', () => {
+    // Add and commit a file so it is fully tracked.
+    const filePath = join(wcDir, 'todelete.txt');
+    writeFileSync(filePath, 'bye');
+    spawnSync('svn', ['add', filePath], { encoding: 'utf8' });
+    spawnSync('svn', ['commit', '-m', 'add todelete', '--username', 'test', '--no-auth-cache'], { cwd: wcDir, encoding: 'utf8' });
+
+    const result = deleteFile(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(filePath));
+
+    const status = spawnSync('svn', ['status', filePath], { encoding: 'utf8' });
+    assert.match(status.stdout.trim(), /^D/);
+  });
+
+  it('deleteFolder removes a committed folder', () => {
+    const dirPath = join(wcDir, 'mydir');
+    mkdirSync(dirPath);
+    writeFileSync(join(dirPath, 'f.txt'), 'x');
+    spawnSync('svn', ['add', dirPath], { encoding: 'utf8' });
+    spawnSync('svn', ['commit', '-m', 'add mydir', '--username', 'test', '--no-auth-cache'], { cwd: wcDir, encoding: 'utf8' });
+
+    const result = deleteFolder(dirPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(dirPath));
+  });
+
+  it('auto-detects SVN from .svn directory', () => {
+    clearProvider();  // Remove explicit provider — rely on auto-detection.
+    const filePath = join(wcDir, 'detected.txt');
+    writeFileSync(filePath, 'x');
+
+    const result = finishedWrite(filePath);
+    assert.isTrue(result.success, result.message);
+
+    const status = spawnSync('svn', ['status', filePath], { encoding: 'utf8' });
+    assert.match(status.stdout.trim(), /^A/);
+
+    setProvider(new SvnProvider());  // Restore for remaining tests.
   });
 });
