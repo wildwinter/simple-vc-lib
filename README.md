@@ -57,11 +57,10 @@ Game development tools often create, modify, or delete content files — dialogu
 The source can be found on [Github](https://github.com/wildwinter/simple-vc-lib), and is available under the MIT license.
 
 ## Releases
-Releases are available in the releases area on [Github](https://github.com/wildwinter/simple-vc-lib/releases):
-* **Javascript** — an ESM module (`simpleVcLib.js`) and a CommonJS module (`simpleVcLib.cjs`) for use in Node.js tools.
-* **C#** — a .NET 8 DLL (`SimpleVCLib.dll`) for use in any C# project.
+* **Javascript** — available on [npm](https://www.npmjs.com/package/@wildwinter/simple-vc-lib) as `@wildwinter/simple-vc-lib`. Includes ESM and CommonJS builds with TypeScript definitions.
+* **C#** — available on [NuGet](https://www.nuget.org/packages/wildwinter.SimpleVCLib) as `wildwinter.SimpleVCLib`. Targets .NET 8.
 
-Both are cross-platform (macOS Arm64 and Windows x64).
+Both are cross-platform (macOS Arm64 and Windows x64). Zip archives are also available in the [GitHub releases area](https://github.com/wildwinter/simple-vc-lib/releases).
 
 ## Supported Version Control Systems
 | System | CLI used | Detection |
@@ -164,10 +163,18 @@ VCLib.ClearProvider();                // Restore auto-detection
 Available provider classes: `GitProvider`, `PerforceProvider`, `PlasticProvider`, `SvnProvider`, `FilesystemProvider`.
 
 ### Javascript
-Add `simpleVcLib.js` (ESM) or `simpleVcLib.cjs` (CommonJS) to your project.
+Install via npm:
+```bash
+npm install @wildwinter/simple-vc-lib
+```
+
+Or download `simpleVcLib.js` (ESM) or `simpleVcLib.cjs` (CommonJS) from the [GitHub releases area](https://github.com/wildwinter/simple-vc-lib/releases) and add them directly to your project.
 
 ```javascript
-// ESM
+// ESM (npm)
+import { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite, deleteFile, deleteFolder } from '@wildwinter/simple-vc-lib';
+
+// ESM (direct file)
 import { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite, deleteFile, deleteFolder } from './simpleVcLib.js';
 
 // All-in-one helpers (checkout + write + add to VC)
@@ -196,12 +203,20 @@ if (!add.success) {
 ```
 
 ```javascript
-// CommonJS
+// CommonJS (npm)
+const { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite } = require('@wildwinter/simple-vc-lib');
+
+// CommonJS (direct file)
 const { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite } = require('./simpleVcLib.cjs');
 ```
 
 ### C#
-Add `SimpleVCLib.dll` to your project references.
+Install via NuGet:
+```bash
+dotnet add package wildwinter.SimpleVCLib
+```
+
+Or download `SimpleVCLib.dll` from the [GitHub releases area](https://github.com/wildwinter/simple-vc-lib/releases) and add it to your project references directly.
 
 ```csharp
 using SimpleVCLib;

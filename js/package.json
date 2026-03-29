@@ -1,11 +1,38 @@
 {
-  "name": "simple-vc-lib-js",
+  "name": "@wildwinter/simple-vc-lib",
+  "version": "0.0.3",
+  "description": "An agnostic version control wrapper library for game development tools.",
+  "keywords": [
+    "version-control",
+    "git",
+    "perforce",
+    "plastic",
+    "svn",
+    "gamedev",
+    "vcs"
+  ],
+  "license": "MIT",
+  "author": "Ian Thomas",
   "type": "module",
+  "main": "dist/simpleVcLib.cjs",
+  "module": "dist/simpleVcLib.js",
+  "types": "dist/simpleVcLib.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/simpleVcLib.js",
+      "require": "./dist/simpleVcLib.cjs",
+      "types": "./dist/simpleVcLib.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "clean": "rm -rf ./dist",
-    "build": "npx rollup -c",
+    "build": "npx rollup -c && cp src/index.d.ts dist/simpleVcLib.d.ts && cp ../README.md dist/README.md && cp ../LICENSE dist/LICENSE",
     "test": "npx mocha",
-    "pack": "npm run build && cp ../README.md ./dist && mkdir -p ../dist/v$npm_package_version && rm -rf ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip && zip -r ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip ./dist"
+    "pack": "npm run build && mkdir -p ../dist/v$npm_package_version && rm -rf ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip && zip -r ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip ./dist",
+    "publish-npm": "npm run build && cp ../README.md ./README.md && cp ../LICENSE ./LICENSE && npm publish --access public; rm -f ./README.md ./LICENSE"
   },
   "devDependencies": {
     "chai": "^5.1.2",
