@@ -1,6 +1,6 @@
 {
   "name": "@wildwinter/simple-vc-lib",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "An agnostic version control wrapper library for game development tools.",
   "keywords": [
     "version-control",
@@ -28,16 +28,17 @@
     "dist"
   ],
   "scripts": {
-    "clean": "rm -rf ./dist",
-    "build": "npx rollup -c && cp src/index.d.ts dist/simpleVcLib.d.ts && cp ../README.md dist/README.md && cp ../LICENSE dist/LICENSE",
+    "clean": "shx rm -rf ./dist",
+    "build": "npx rollup -c && shx cp src/index.d.ts dist/simpleVcLib.d.ts && shx cp ../README.md dist/README.md && shx cp ../LICENSE dist/LICENSE",
     "test": "npx mocha",
     "perforce-tests": "npx mocha test/perforce.test.js",
-    "pack": "npm run build && mkdir -p ../dist/v$npm_package_version && rm -rf ../dist/v$npm_package_version/simple-vc-lib-js-v$npm_package_version.zip && zip -r ../dist/v$npm_package_version/simple-vc-lib-js-v$npm_package_version.zip ./dist",
-    "publish-npm": "npm run build && cp ../README.md ./README.md && cp ../LICENSE ./LICENSE && npm publish --access public; rm -f ./README.md ./LICENSE"
+    "pack": "npm run build && shx mkdir -p ../dist/v$npm_package_version && shx rm -rf ../dist/v$npm_package_version/simple-vc-lib-js-v$npm_package_version.zip && zip -r ../dist/v$npm_package_version/simple-vc-lib-js-v$npm_package_version.zip ./dist",
+    "publish-npm": "npm run build && shx cp ../README.md ./README.md && shx cp ../LICENSE ./LICENSE && npm publish --access public; shx rm -f ./README.md ./LICENSE"
   },
   "devDependencies": {
     "chai": "^5.1.2",
     "mocha": "^10.8.2",
-    "rollup": "^4.27.3"
+    "rollup": "^4.27.3",
+    "shx": "^0.4.0"
   }
 }

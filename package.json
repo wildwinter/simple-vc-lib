@@ -13,11 +13,14 @@
     "test": "npm run test:js && npm run test:cs",
     "test:js": "cd js && npm test",
     "test:cs": "cd csharp && npm test",
-    "pack": "rm -rf ./dist/v$npm_package_version && npm run pack:js && npm run pack:cs",
+    "pack": "shx rm -rf ./dist/v$npm_package_version && npm run pack:js && npm run pack:cs",
     "pack:js": "cd js && npm run pack",
     "pack:cs": "cd csharp && npm run pack",
     "perforce-tests": "cd js && npm run perforce-tests",
     "publish-npm": "npm run sync-version && cd js && npm run publish-npm",
     "publish-nuget": "npm run sync-version && cd csharp && npm run publish-nuget"
+  },
+  "devDependencies": {
+    "shx": "^0.4.0"
   }
 }

@@ -4,8 +4,11 @@
     "clean": "dotnet clean ./SimpleVCLib/SimpleVCLib.csproj",
     "build": "dotnet build ./SimpleVCLib/SimpleVCLib.csproj",
     "test": "npm run build && dotnet test ./SimpleVCLib.Tests/SimpleVCLib.Tests.csproj",
-    "dist": "rm -rf ./dist && dotnet build -c Release ./SimpleVCLib/SimpleVCLib.csproj && mkdir -p ./dist && cp ./SimpleVCLib/bin/Release/net8.0/SimpleVCLib.dll ./dist && cp ../README.md ./dist && cp ../LICENSE ./dist",
-    "pack": "npm run dist && mkdir -p ../dist/v$npm_package_version && rm -rf ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip && zip -r ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip ./dist",
+    "dist": "shx rm -rf ./dist && dotnet build -c Release ./SimpleVCLib/SimpleVCLib.csproj && shx mkdir -p ./dist && shx cp ./SimpleVCLib/bin/Release/net8.0/SimpleVCLib.dll ./dist && shx cp ../README.md ./dist && shx cp ../LICENSE ./dist",
+    "pack": "npm run dist && shx mkdir -p ../dist/v$npm_package_version && shx rm -rf ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip && zip -r ../dist/v$npm_package_version/$npm_package_name-v$npm_package_version.zip ./dist",
     "publish-nuget": "dotnet pack -c Release ./SimpleVCLib/SimpleVCLib.csproj -o ./nupkg && dotnet nuget push ./nupkg/*.nupkg --api-key $NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate"
+  },
+  "devDependencies": {
+    "shx": "^0.4.0"
   }
 }
