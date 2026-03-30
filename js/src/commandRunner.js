@@ -12,10 +12,18 @@ export function runCommand(command, args, options = {}) {
     windowsHide: true,
   });
 
+  let errText = (result.stderr ?? '').trim();
+  // If spawnSync failed to even launch the process (e.g. ENOENT), capture the underlying error message.
+  if (!errText && result.error) {
+    errText = result.error.message;
+  }
+  
+  const exitCode = result.status ?? -1;
+
   return {
-    exitCode: result.status ?? -1,
+    exitCode,
     output: (result.stdout ?? '').trim(),
-    error: (result.stderr ?? '').trim(),
+    error: errText,
     timedOut: result.signal === 'SIGTERM' || result.signal === 'SIGKILL',
   };
 }

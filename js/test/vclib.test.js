@@ -165,16 +165,20 @@ describe('FilesystemProvider', () => {
 // GitProvider tests (uses a temporary git repo)
 // ---------------------------------------------------------------------------
 
-describe('GitProvider', () => {
+describe('GitProvider', function () {
   let repoDir;
 
-  before(() => {
+  before(function () {
+    const check = spawnSync('git', ['--version'], { encoding: 'utf8' });
+    if (check.error || check.status !== 0) {
+      this.skip();
+    }
     repoDir = makeTempDir();
     initGitRepo(repoDir);
     setProvider(new GitProvider());
   });
 
-  after(() => {
+  after(function () {
     clearProvider();
   });
 
