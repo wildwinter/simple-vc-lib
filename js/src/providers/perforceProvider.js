@@ -59,8 +59,7 @@ export class PerforceProvider {
     if (!existsSync(filePath))
       return errorResult('error', `'${filePath}' does not exist after write`);
 
-    const info = fstat(filePath);
-    if (info !== null) return okResult();
+    if (isInDepot(filePath)) return okResult();
 
     const result = p4(['add', filePath]);
     if (result.exitCode === 0) return okResult('File opened for add in Perforce');

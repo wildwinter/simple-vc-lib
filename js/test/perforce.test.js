@@ -62,7 +62,19 @@ function submitFile(filePath, content = 'test content') {
   writeFileSync(filePath, content);
   const addResult = p4(['add', filePath]);
   assert.equal(addResult.status, 0,
-    `p4 add failed for '${filePath}' — is the path mapped in your workspace?\n${addResult.stderr || addResult.stdout}`);
+    `p4 add failed for '${filePath}' — is the path mapped in your workspace?\n` +
+    `stdout: ${addResult.stdout}\nstderr: ${addResult.stderr}`);
+
+  // Verify the file is actually open — p4 add exits 0 even when a .p4ignore rule
+  // silently filters the file, leaving the default changelist empty.
+  const openedResult = p4(['opened', filePath]);
+  assert.equal(openedResult.status, 0,
+    `p4 add returned exit 0 but '${filePath}' is not open in any changelist.\n` +
+    `p4 add output: ${addResult.stdout || addResult.stderr}\n` +
+    `Likely cause: a .p4ignore file in your workspace is filtering this path.\n` +
+    `Fix: add an exception for the test directory in your .p4ignore, e.g.:\n` +
+    `  !_simple_vc_lib_test/`);
+
   const submitResult = p4(['submit', '-d', `add ${filePath} (simple-vc-lib test)`]);
   assert.equal(submitResult.status, 0,
     `p4 submit failed for '${filePath}'\n${submitResult.stderr || submitResult.stdout}`);

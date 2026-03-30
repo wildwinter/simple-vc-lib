@@ -34,8 +34,7 @@ public class PerforceProvider : IVCProvider
         if (!File.Exists(filePath))
             return VCResult.Error($"'{filePath}' does not exist after write");
 
-        var fstat = Fstat(filePath);
-        if (fstat is not null) return VCResult.Ok();
+        if (IsInDepot(filePath)) return VCResult.Ok();
 
         var result = P4(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File opened for add in Perforce");
