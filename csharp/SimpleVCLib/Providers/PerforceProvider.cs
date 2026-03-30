@@ -90,8 +90,23 @@ public class PerforceProvider : IVCProvider
         if (IsInDepot(oldPath))
         {
             var result = P4(["move", oldPath, newPath]);
-            if (result.ExitCode == 0) return VCResult.Ok();
-            return VCResult.Error($"Cannot rename '{oldPath}' in Perforce: {result.Error ?? result.Output}");
+            if (result.ExitCode != 0)
+                return VCResult.Error($"Cannot rename '{oldPath}' in Perforce: {result.Error ?? result.Output}");
+            // p4 move opens the source for move/delete but leaves it on disk.
+            // Physically remove it, consistent with p4 delete behaviour.
+            if (File.Exists(oldPath))
+            {
+                try
+                {
+                    new FileInfo(oldPath).IsReadOnly = false;
+                    File.Delete(oldPath);
+                }
+                catch (Exception ex)
+                {
+                    return VCResult.Error($"Cannot remove source '{oldPath}' after p4 move: {ex.Message}");
+                }
+            }
+            return VCResult.Ok();
         }
         return _fs.RenameFile(oldPath, newPath);
     }

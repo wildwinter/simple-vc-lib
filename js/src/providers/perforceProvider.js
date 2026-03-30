@@ -98,8 +98,19 @@ export class PerforceProvider {
     if (!existsSync(oldPath)) return okResult();
     if (isInDepot(oldPath)) {
       const result = p4(['move', oldPath, newPath]);
-      if (result.exitCode === 0) return okResult();
-      return errorResult('error', `Cannot rename '${oldPath}' in Perforce: ${result.error || result.output}`);
+      if (result.exitCode !== 0)
+        return errorResult('error', `Cannot rename '${oldPath}' in Perforce: ${result.error || result.output}`);
+      // p4 move opens the source for move/delete but leaves it on disk.
+      // Physically remove it, consistent with p4 delete behaviour.
+      if (existsSync(oldPath)) {
+        try {
+          chmodSync(oldPath, 0o666);
+          unlinkSync(oldPath);
+        } catch (e) {
+          return errorResult('error', `Cannot remove source '${oldPath}' after p4 move: ${e.message}`);
+        }
+      }
+      return okResult();
     }
     return fs.renameFile(oldPath, newPath);
   }
