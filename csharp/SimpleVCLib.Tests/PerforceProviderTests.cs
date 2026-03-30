@@ -14,10 +14,16 @@ namespace SimpleVCLib.Tests;
 ///   cd csharp
 ///   dotnet test
 ///
+/// Set P4_TEST_DIR to point at a mapped workspace directory:
+///   P4_TEST_DIR=C:\path\to\workspace dotnet test
+///
+/// If P4_TEST_DIR is not set, falls back to the workspace root from p4 info.
+/// The suite is skipped automatically if neither is available.
+///
 /// Requirements:
 ///   - p4 on PATH
 ///   - P4PORT / P4USER / P4CLIENT configured (env vars, p4 config, or p4 tickets)
-///   - The workspace must include a mapped depot path for the workspace root
+///   - P4_TEST_DIR (or the auto-detected workspace root) must be a mapped depot path
 ///
 /// The tests create a temporary subdirectory inside the workspace root, submit
 /// files to the depot to simulate a real tracked state, exercise the API, then
@@ -33,7 +39,7 @@ public class PerforceProviderTests : IDisposable
         _available = P4Available();
         if (_available)
         {
-            var root = WorkspaceRoot();
+            var root = Environment.GetEnvironmentVariable("P4_TEST_DIR") ?? WorkspaceRoot();
             _available = root is not null;
             _testDir = root is not null
                 ? Path.Combine(root, "_simple_vc_lib_test")

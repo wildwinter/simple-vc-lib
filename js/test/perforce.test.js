@@ -5,16 +5,22 @@
  * They are NOT included in the default `npm test` run. Run manually with:
  *
  *   cd js
- *   npx mocha test/perforce.test.js
+ *   P4_TEST_DIR=/path/to/your/p4/workspace npx mocha test/perforce.test.js
+ *
+ * On Windows:
+ *   set P4_TEST_DIR=C:\path\to\your\p4\workspace && npx mocha test/perforce.test.js
+ *
+ * If P4_TEST_DIR is not set, the tests fall back to the workspace root reported
+ * by `p4 info`. If that also fails, the suite is skipped.
  *
  * Requirements:
  *   - `p4` on PATH
  *   - P4PORT / P4USER / P4CLIENT configured (env vars, p4 config, or p4 tickets)
- *   - The workspace must include a mapped depot path for the workspace root
+ *   - P4_TEST_DIR (or the auto-detected workspace root) must be a mapped depot path
  *
- * The tests create a temporary subdirectory inside the workspace root, submit
- * files to the depot to simulate a real tracked state, exercise the API, then
- * clean up by reverting and deleting everything they submitted.
+ * The tests create a temporary subdirectory inside that path, submit files to
+ * the depot to simulate a real tracked state, exercise the API, then clean up
+ * by reverting and deleting everything they submitted.
  */
 
 import { assert } from 'chai';
@@ -72,9 +78,9 @@ describe('PerforceProvider', function () {
       console.log('    Skipping: p4 not available or workspace not configured.');
       this.skip();
     }
-    const root = workspaceRoot();
+    const root = process.env.P4_TEST_DIR ?? workspaceRoot();
     if (!root) {
-      console.log('    Skipping: could not determine workspace root from p4 info.');
+      console.log('    Skipping: set P4_TEST_DIR to a mapped workspace path, or ensure p4 info reports a client root.');
       this.skip();
     }
     testDir = join(root, '_simple_vc_lib_test');
