@@ -34,7 +34,14 @@ public class PlasticProvider : IVCProvider
         if (!File.Exists(filePath))
             return VCResult.Error($"'{filePath}' does not exist after write");
 
-        if (IsTracked(filePath)) return VCResult.Ok();
+        // cm status --short: exit non-zero = outside workspace, exit 0 with '?' = untracked inside workspace.
+        var statusResult = Cm(["status", "--short", filePath]);
+        if (statusResult.ExitCode != 0)
+            return _fs.FinishedWrite(filePath);
+
+        var lines = statusResult.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var isTracked = lines.Length > 0 && !lines[0].TrimStart().StartsWith('?');
+        if (isTracked) return VCResult.Ok();
 
         var result = Cm(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File added to Plastic SCM");

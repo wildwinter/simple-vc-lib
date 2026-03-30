@@ -120,6 +120,28 @@ public class PerforceProviderTests : IDisposable
     }
 
     [Fact]
+    public void FinishedWrite_FileOutsideWorkspace_ReturnsOkWithoutP4Add()
+    {
+        if (!_available) return;
+
+        var outsideDir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(outsideDir);
+        try
+        {
+            var filePath = Path.Combine(outsideDir, "outside.txt");
+            File.WriteAllText(filePath, "not in workspace");
+
+            var result = VCLib.FinishedWrite(filePath);
+            Assert.True(result.Success, result.Message);
+            Assert.True(File.Exists(filePath));
+        }
+        finally
+        {
+            Directory.Delete(outsideDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void WriteTextFile_SubmittedFile_ChecksOutAndWrites()
     {
         if (!_available) return;

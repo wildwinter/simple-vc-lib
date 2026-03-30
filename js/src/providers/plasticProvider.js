@@ -53,7 +53,14 @@ export class PlasticProvider {
     if (!existsSync(filePath))
       return errorResult('error', `'${filePath}' does not exist after write`);
 
-    if (isTracked(filePath)) return okResult();
+    // cm status --short: exit non-zero = outside workspace, exit 0 with '?' = untracked inside workspace.
+    const statusResult = cm(['status', '--short', filePath]);
+    if (statusResult.exitCode !== 0)
+      return fs.finishedWrite(filePath);
+
+    const lines = statusResult.output.split('\n').filter(l => l.trim());
+    const tracked = lines.length > 0 && !lines[0].startsWith('?');
+    if (tracked) return okResult();
 
     const result = cm(['add', filePath]);
     if (result.exitCode === 0) return okResult('File added to Plastic SCM');

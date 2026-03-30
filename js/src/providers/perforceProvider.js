@@ -19,7 +19,10 @@ function fstat(filePath) {
 }
 
 function isInDepot(filePath) {
-  const info = fstat(filePath);
+  return isInDepotFstat(fstat(filePath));
+}
+
+function isInDepotFstat(info) {
   if (info === null) return false;
 
   // p4 fstat exits 0 for workspace-mapped files even if never submitted to the depot,
@@ -73,7 +76,13 @@ export class PerforceProvider {
     if (!existsSync(filePath))
       return errorResult('error', `'${filePath}' does not exist after write`);
 
-    if (isInDepot(filePath)) return okResult();
+    const info = fstat(filePath);
+
+    // File is outside the workspace mapping entirely — no Perforce action needed.
+    if (info === null)
+      return fs.finishedWrite(filePath);
+
+    if (isInDepotFstat(info)) return okResult();
 
     const result = p4(['add', filePath]);
     if (result.exitCode === 0) return okResult('File opened for add in Perforce');

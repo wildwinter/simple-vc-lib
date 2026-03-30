@@ -22,7 +22,13 @@ public class GitProvider : IVCProvider
 
         if (IsTracked(filePath)) return VCResult.Ok();
 
-        var result = Git(["add", filePath], Path.GetDirectoryName(filePath)!);
+        var cwd = Path.GetDirectoryName(filePath)!;
+
+        // File is outside the git repo entirely — no git action needed.
+        if (!IsInRepo(cwd))
+            return _fs.FinishedWrite(filePath);
+
+        var result = Git(["add", filePath], cwd);
         if (result.ExitCode == 0) return VCResult.Ok("File added to git");
         return VCResult.Error($"Cannot add '{filePath}' to git: {result.Error ?? result.Output}");
     }
@@ -87,6 +93,12 @@ public class GitProvider : IVCProvider
     {
         var cwd = Path.GetDirectoryName(filePath) ?? ".";
         var result = Git(["ls-files", "--error-unmatch", filePath], cwd);
+        return result.ExitCode == 0;
+    }
+
+    private static bool IsInRepo(string dir)
+    {
+        var result = Git(["rev-parse", "--git-dir"], dir);
         return result.ExitCode == 0;
     }
 

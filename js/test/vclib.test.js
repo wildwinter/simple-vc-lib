@@ -225,6 +225,16 @@ describe('GitProvider', function () {
     assert.isTrue(result.success);
   });
 
+  it('finishedWrite on a file outside the repo returns ok without git add', () => {
+    const outsideDir = makeTempDir();
+    const filePath = join(outsideDir, 'outside.txt');
+    writeFileSync(filePath, 'not in repo');
+
+    const result = finishedWrite(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.isTrue(existsSync(filePath));
+  });
+
   it('deleteFile removes an untracked file', () => {
     const filePath = join(repoDir, 'untracked.txt');
     writeFileSync(filePath, 'temp');
@@ -346,6 +356,16 @@ describe('SvnProvider', function () {
     // initial.txt was committed in initSvnRepo.
     const result = finishedWrite(join(wcDir, 'initial.txt'));
     assert.isTrue(result.success);
+  });
+
+  it('finishedWrite on a file outside the working copy returns ok without svn add', () => {
+    const outsideDir = makeTempDir();
+    const filePath = join(outsideDir, 'outside.txt');
+    writeFileSync(filePath, 'not in working copy');
+
+    const result = finishedWrite(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.isTrue(existsSync(filePath));
   });
 
   it('deleteFile removes a committed file', () => {

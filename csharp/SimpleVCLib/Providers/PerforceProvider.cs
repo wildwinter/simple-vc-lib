@@ -34,7 +34,13 @@ public class PerforceProvider : IVCProvider
         if (!File.Exists(filePath))
             return VCResult.Error($"'{filePath}' does not exist after write");
 
-        if (IsInDepot(filePath)) return VCResult.Ok();
+        var fstat = Fstat(filePath);
+
+        // File is outside the workspace mapping entirely — no Perforce action needed.
+        if (fstat is null)
+            return _fs.FinishedWrite(filePath);
+
+        if (IsInDepotFstat(fstat)) return VCResult.Ok();
 
         var result = P4(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File opened for add in Perforce");
@@ -132,9 +138,10 @@ public class PerforceProvider : IVCProvider
         return result.ExitCode == 0 ? result.Output : null;
     }
 
-    private static bool IsInDepot(string filePath)
+    private static bool IsInDepot(string filePath) => IsInDepotFstat(Fstat(filePath));
+
+    private static bool IsInDepotFstat(string? fstat)
     {
-        var fstat = Fstat(filePath);
         if (fstat is null) return false;
 
         // p4 fstat exits 0 for workspace-mapped files even if never submitted to the depot,

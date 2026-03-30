@@ -2,6 +2,9 @@ import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, rename
 import { dirname } from 'path';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
+import { FilesystemProvider } from './filesystemProvider.js';
+
+const fs = new FilesystemProvider();
 
 function isWritable(filePath) {
   try {
@@ -38,6 +41,13 @@ function isTracked(filePath) {
 }
 
 /**
+ * Returns true if the given directory is inside a git repository.
+ */
+function isInRepo(dir) {
+  return git(['rev-parse', '--git-dir'], dir).exitCode === 0;
+}
+
+/**
  * Git provider.
  *
  * Git does not use file locking, so prepareToWrite only needs to ensure the
@@ -59,7 +69,13 @@ export class GitProvider {
 
     if (isTracked(filePath)) return okResult();
 
-    const result = git(['add', filePath], dirname(filePath));
+    const cwd = dirname(filePath);
+
+    // File is outside the git repo entirely — no git action needed.
+    if (!isInRepo(cwd))
+      return fs.finishedWrite(filePath);
+
+    const result = git(['add', filePath], cwd);
     if (result.exitCode === 0) return okResult('File added to git');
     return errorResult('error', `Cannot add '${filePath}' to git: ${result.error || result.output}`);
   }

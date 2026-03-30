@@ -40,6 +40,12 @@ public class SvnProvider : IVCProvider
 
         if (IsTracked(filePath)) return VCResult.Ok();
 
+        // An unversioned file inside a working copy has a versioned parent directory.
+        // If the parent is not tracked either, the file is outside the working copy entirely.
+        var parentDir = Path.GetDirectoryName(filePath);
+        if (parentDir == null || !IsTracked(parentDir))
+            return _fs.FinishedWrite(filePath);
+
         var result = Svn(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File added to SVN");
         return VCResult.Error($"Cannot add '{filePath}' to SVN: {result.Error ?? result.Output}");

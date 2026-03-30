@@ -320,6 +320,25 @@ public class GitProviderTests : IDisposable
     }
 
     [Fact]
+    public void FinishedWrite_FileOutsideRepo_ReturnsOkWithoutGitAdd()
+    {
+        var outsideDir = TestHelpers.MakeTempDir();
+        try
+        {
+            var filePath = Path.Combine(outsideDir, "outside.txt");
+            File.WriteAllText(filePath, "not in repo");
+
+            var result = VCLib.FinishedWrite(filePath);
+            Assert.True(result.Success, result.Message);
+            Assert.True(File.Exists(filePath));
+        }
+        finally
+        {
+            Directory.Delete(outsideDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void DeleteFile_UntrackedFile_DeletesIt()
     {
         var filePath = Path.Combine(_repoDir, "untracked.txt");
@@ -486,6 +505,27 @@ public class SvnProviderTests : IDisposable
         // initial.txt was committed in InitSvnRepo.
         var result = VCLib.FinishedWrite(Path.Combine(_wcDir, "initial.txt"));
         Assert.True(result.Success);
+    }
+
+    [Fact]
+    public void FinishedWrite_FileOutsideWorkingCopy_ReturnsOkWithoutSvnAdd()
+    {
+        if (!_available) return;
+
+        var outsideDir = TestHelpers.MakeTempDir();
+        try
+        {
+            var filePath = Path.Combine(outsideDir, "outside.txt");
+            File.WriteAllText(filePath, "not in working copy");
+
+            var result = VCLib.FinishedWrite(filePath);
+            Assert.True(result.Success, result.Message);
+            Assert.True(File.Exists(filePath));
+        }
+        finally
+        {
+            Directory.Delete(outsideDir, recursive: true);
+        }
     }
 
     [Fact]

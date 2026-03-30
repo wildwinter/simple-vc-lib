@@ -1,4 +1,5 @@
 import { existsSync, unlinkSync, rmSync } from 'fs';
+import { dirname } from 'path';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { FilesystemProvider } from './filesystemProvider.js';
@@ -56,6 +57,11 @@ export class SvnProvider {
       return errorResult('error', `'${filePath}' does not exist after write`);
 
     if (isTracked(filePath)) return okResult();
+
+    // An unversioned file inside a working copy has a versioned parent directory.
+    // If the parent is not tracked either, the file is outside the working copy entirely.
+    if (!isTracked(dirname(filePath)))
+      return fs.finishedWrite(filePath);
 
     const result = svn(['add', filePath]);
     if (result.exitCode === 0) return okResult('File added to SVN');
