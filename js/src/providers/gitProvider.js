@@ -23,7 +23,9 @@ function makeWritable(filePath) {
 }
 
 function git(args, cwd) {
-  return runCommand('git', args, { cwd });
+  const isWindows = process.platform === 'win32';
+  const safeArgs = isWindows ? args.map(arg => typeof arg === 'string' ? arg.replace(/\\/g, '/') : arg) : args;
+  return runCommand('git', safeArgs, { cwd });
 }
 
 /**

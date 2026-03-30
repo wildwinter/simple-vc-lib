@@ -91,5 +91,5 @@ public class GitProvider : IVCProvider
     }
 
     private static CommandRunner.Result Git(string[] args, string cwd) =>
-        CommandRunner.Run("git", args, workingDirectory: cwd);
+        CommandRunner.Run("git", ["-C", cwd, ..args], workingDirectory: cwd);
 }

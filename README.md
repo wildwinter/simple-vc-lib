@@ -89,6 +89,7 @@ The library calls the relevant CLI under the hood. The appropriate CLI tool must
 * Use **`writeTextFile`** or **`writeBinaryFile`** to write a file. These all-in-one helpers check out or unlock the file if needed, write it, and add it to VC if it's new. Works whether or not the file already exists.
 * If you need finer control, the steps are also available individually: call **`prepareToWrite`** before writing (checks out / unlocks the file, or no-ops if it doesn't exist yet), then write the file yourself, then call **`finishedWrite`** afterwards (adds the file to VC if it's new).
 * Call **`deleteFile`** or **`deleteFolder`** to remove files. Tracked files will be marked for deletion in the VC system; untracked files are just deleted from disk.
+* Call **`renameFile`** or **`renameFolder`** to move or rename files and directories. Tracked items are moved within the VC system; untracked items are moved on disk.
 
 You don't need to tell the library which VC system is in use — it detects this automatically. See [VC Detection](#vc-detection) below.
 

@@ -75,7 +75,8 @@ public class PerforceProvider : IVCProvider
         if (!Directory.Exists(folderPath)) return VCResult.Ok();
 
         // The /... wildcard schedules the entire depot subtree for deletion.
-        var depotPath = folderPath.Replace('\\', '/') + "/...";
+        var isWin = Path.DirectorySeparatorChar == '\\';
+        var depotPath = (isWin ? folderPath.Replace('\\', '/') : folderPath) + "/...";
         P4(["delete", depotPath]); // Non-tracked paths return non-zero; that is expected.
 
         if (Directory.Exists(folderPath))
@@ -102,8 +103,9 @@ public class PerforceProvider : IVCProvider
     {
         if (!Directory.Exists(oldPath)) return VCResult.Ok();
         // p4 move with /... wildcard handles tracked files and physically moves them.
-        var src = oldPath.Replace('\\', '/') + "/...";
-        var dst = newPath.Replace('\\', '/') + "/...";
+        var isWin = Path.DirectorySeparatorChar == '\\';
+        var src = (isWin ? oldPath.Replace('\\', '/') : oldPath) + "/...";
+        var dst = (isWin ? newPath.Replace('\\', '/') : newPath) + "/...";
         P4(["edit", src]);
         P4(["move", src, dst]);
         // Move any untracked files that p4 left behind.

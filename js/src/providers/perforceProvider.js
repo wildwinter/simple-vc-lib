@@ -123,8 +123,9 @@ export class PerforceProvider {
   renameFolder(oldPath, newPath) {
     if (!existsSync(oldPath)) return okResult();
     // p4 move with /... wildcard handles tracked files and physically moves them.
-    const src = oldPath.replace(/\\/g, '/') + '/...';
-    const dst = newPath.replace(/\\/g, '/') + '/...';
+    const isWin = process.platform === 'win32';
+    const src = (isWin ? oldPath.replace(/\\/g, '/') : oldPath) + '/...';
+    const dst = (isWin ? newPath.replace(/\\/g, '/') : newPath) + '/...';
     p4(['edit', src]);
     p4(['move', src, dst]);
     // Move any untracked files that p4 left behind.
@@ -144,7 +145,8 @@ export class PerforceProvider {
     if (!existsSync(folderPath)) return okResult();
 
     // The /... wildcard schedules the entire depot subtree for deletion.
-    const depotPath = folderPath.replace(/\\/g, '/') + '/...';
+    const isWin = process.platform === 'win32';
+    const depotPath = (isWin ? folderPath.replace(/\\/g, '/') : folderPath) + '/...';
     const result = p4(['delete', depotPath]);
 
     if (existsSync(folderPath)) {
