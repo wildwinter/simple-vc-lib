@@ -1,4 +1,4 @@
-import { existsSync, unlinkSync, rmSync } from 'fs';
+import { existsSync, unlinkSync, rmSync, cpSync, mkdirSync } from 'fs';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { FilesystemProvider } from './filesystemProvider.js';
@@ -78,6 +78,35 @@ export class PerforceProvider {
     } catch (e) {
       return errorResult('error', `Cannot delete '${filePath}': ${e.message}`);
     }
+  }
+
+  renameFile(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    if (isInDepot(oldPath)) {
+      const result = p4(['move', oldPath, newPath]);
+      if (result.exitCode === 0) return okResult();
+      return errorResult('error', `Cannot rename '${oldPath}' in Perforce: ${result.error || result.output}`);
+    }
+    return fs.renameFile(oldPath, newPath);
+  }
+
+  renameFolder(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    // p4 move with /... wildcard handles tracked files and physically moves them.
+    const src = oldPath.replace(/\\/g, '/') + '/...';
+    const dst = newPath.replace(/\\/g, '/') + '/...';
+    p4(['move', src, dst]);
+    // Move any untracked files that p4 left behind.
+    if (existsSync(oldPath)) {
+      try {
+        mkdirSync(newPath, { recursive: true });
+        cpSync(oldPath, newPath, { recursive: true });
+        rmSync(oldPath, { recursive: true, force: true });
+      } catch (e) {
+        return errorResult('error', `Cannot rename folder '${oldPath}': ${e.message}`);
+      }
+    }
+    return okResult();
   }
 
   deleteFolder(folderPath) {

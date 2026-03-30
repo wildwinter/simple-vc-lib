@@ -195,6 +195,47 @@ public class FilesystemProviderTests : IDisposable
         Assert.True(result.Success);
     }
 
+    [Fact]
+    public void RenameFile_ExistingFile_MovesIt()
+    {
+        var oldPath = Path.Combine(_tempDir, "original.txt");
+        var newPath = Path.Combine(_tempDir, "renamed.txt");
+        File.WriteAllText(oldPath, "content");
+
+        var result = VCLib.RenameFile(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(oldPath));
+        Assert.True(File.Exists(newPath));
+    }
+
+    [Fact]
+    public void RenameFile_MissingFile_ReturnsOk()
+    {
+        var result = VCLib.RenameFile(Path.Combine(_tempDir, "ghost.txt"), Path.Combine(_tempDir, "other.txt"));
+        Assert.True(result.Success);
+    }
+
+    [Fact]
+    public void RenameFolder_ExistingFolder_MovesIt()
+    {
+        var oldPath = Path.Combine(_tempDir, "oldfolder");
+        var newPath = Path.Combine(_tempDir, "newfolder");
+        Directory.CreateDirectory(oldPath);
+        File.WriteAllText(Path.Combine(oldPath, "a.txt"), "a");
+
+        var result = VCLib.RenameFolder(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(Directory.Exists(oldPath));
+        Assert.True(File.Exists(Path.Combine(newPath, "a.txt")));
+    }
+
+    [Fact]
+    public void RenameFolder_MissingFolder_ReturnsOk()
+    {
+        var result = VCLib.RenameFolder(Path.Combine(_tempDir, "nonexistent"), Path.Combine(_tempDir, "other"));
+        Assert.True(result.Success);
+    }
+
     void IDisposable.Dispose()
     {
         VCLib.ClearProvider();
@@ -286,6 +327,74 @@ public class GitProviderTests : IDisposable
         var result = VCLib.DeleteFile(filePath);
         Assert.True(result.Success);
         Assert.False(File.Exists(filePath));
+    }
+
+    [Fact]
+    public void RenameFile_UntrackedFile_MovesIt()
+    {
+        var oldPath = Path.Combine(_repoDir, "torename.txt");
+        var newPath = Path.Combine(_repoDir, "renamed.txt");
+        File.WriteAllText(oldPath, "content");
+
+        var result = VCLib.RenameFile(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(oldPath));
+        Assert.True(File.Exists(newPath));
+    }
+
+    [Fact]
+    public void RenameFile_TrackedFile_UsesGitMv()
+    {
+        var oldPath = Path.Combine(_repoDir, "tracked-rename.txt");
+        var newPath = Path.Combine(_repoDir, "tracked-renamed.txt");
+        File.WriteAllText(oldPath, "hello");
+
+        static void Git(string args, string cwd)
+        {
+            var psi = new ProcessStartInfo("git", args)
+                { WorkingDirectory = cwd, UseShellExecute = false,
+                  RedirectStandardOutput = true, RedirectStandardError = true };
+            using var p = Process.Start(psi)!;
+            p.WaitForExit();
+        }
+        Git($"add \"{oldPath}\"", _repoDir);
+        Git("commit -m \"add tracked-rename\"", _repoDir);
+
+        var result = VCLib.RenameFile(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(oldPath));
+        Assert.True(File.Exists(newPath));
+
+        // Verify the new path is tracked in git's index (git mv was used, not a plain fs rename).
+        var psiLs = new ProcessStartInfo("git", $"ls-files --error-unmatch \"{newPath}\"")
+            { WorkingDirectory = _repoDir, UseShellExecute = false,
+              RedirectStandardOutput = true, RedirectStandardError = true };
+        using var pl = Process.Start(psiLs)!;
+        pl.WaitForExit();
+        Assert.Equal(0, pl.ExitCode);
+    }
+
+    [Fact]
+    public void RenameFolder_MixedFolder_MovesEverything()
+    {
+        var oldPath = Path.Combine(_repoDir, "folder-to-rename");
+        var newPath = Path.Combine(_repoDir, "folder-renamed");
+        Directory.CreateDirectory(oldPath);
+        var tracked = Path.Combine(oldPath, "tracked.txt");
+        var untracked = Path.Combine(oldPath, "untracked.txt");
+        File.WriteAllText(tracked, "tracked");
+        File.WriteAllText(untracked, "untracked");
+
+        var psiAdd = new ProcessStartInfo("git", $"add \"{tracked}\"")
+            { WorkingDirectory = _repoDir, UseShellExecute = false,
+              RedirectStandardOutput = true, RedirectStandardError = true };
+        using (var p = Process.Start(psiAdd)!) p.WaitForExit();
+
+        var result = VCLib.RenameFolder(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(Directory.Exists(oldPath));
+        Assert.True(File.Exists(Path.Combine(newPath, "tracked.txt")));
+        Assert.True(File.Exists(Path.Combine(newPath, "untracked.txt")));
     }
 
     [Fact]
@@ -411,6 +520,44 @@ public class SvnProviderTests : IDisposable
         var result = VCLib.DeleteFolder(dirPath);
         Assert.True(result.Success, result.Message);
         Assert.False(Directory.Exists(dirPath));
+    }
+
+    [Fact]
+    public void RenameFile_CommittedFile_UsesSvnMove()
+    {
+        if (!_available) return;
+
+        var oldPath = Path.Combine(_wcDir, "svn-rename-src.txt");
+        var newPath = Path.Combine(_wcDir, "svn-rename-dst.txt");
+        File.WriteAllText(oldPath, "hello");
+        Svn($"add \"{oldPath}\"", _wcDir);
+        Svn("commit -m \"add rename-src\" --username test --no-auth-cache", _wcDir);
+
+        var result = VCLib.RenameFile(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(oldPath));
+        Assert.True(File.Exists(newPath));
+
+        var (_, output) = Svn($"status \"{newPath}\"", _wcDir);
+        Assert.StartsWith("A", output);
+    }
+
+    [Fact]
+    public void RenameFolder_CommittedFolder_UsesSvnMove()
+    {
+        if (!_available) return;
+
+        var oldPath = Path.Combine(_wcDir, "svn-rename-dir");
+        var newPath = Path.Combine(_wcDir, "svn-rename-dir-dst");
+        Directory.CreateDirectory(oldPath);
+        File.WriteAllText(Path.Combine(oldPath, "f.txt"), "x");
+        Svn($"add \"{oldPath}\"", _wcDir);
+        Svn("commit -m \"add rename-dir\" --username test --no-auth-cache", _wcDir);
+
+        var result = VCLib.RenameFolder(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(Directory.Exists(oldPath));
+        Assert.True(Directory.Exists(newPath));
     }
 
     [Fact]

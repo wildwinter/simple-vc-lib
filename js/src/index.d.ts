@@ -12,6 +12,8 @@ export interface IVCProvider {
   finishedWrite(filePath: string): VCResult;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
+  renameFile(oldPath: string, newPath: string): VCResult;
+  renameFolder(oldPath: string, newPath: string): VCResult;
 }
 
 export declare class GitProvider implements IVCProvider {
@@ -20,6 +22,8 @@ export declare class GitProvider implements IVCProvider {
   finishedWrite(filePath: string): VCResult;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
+  renameFile(oldPath: string, newPath: string): VCResult;
+  renameFolder(oldPath: string, newPath: string): VCResult;
 }
 
 export declare class PerforceProvider implements IVCProvider {
@@ -28,6 +32,8 @@ export declare class PerforceProvider implements IVCProvider {
   finishedWrite(filePath: string): VCResult;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
+  renameFile(oldPath: string, newPath: string): VCResult;
+  renameFolder(oldPath: string, newPath: string): VCResult;
 }
 
 export declare class PlasticProvider implements IVCProvider {
@@ -36,6 +42,8 @@ export declare class PlasticProvider implements IVCProvider {
   finishedWrite(filePath: string): VCResult;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
+  renameFile(oldPath: string, newPath: string): VCResult;
+  renameFolder(oldPath: string, newPath: string): VCResult;
 }
 
 export declare class SvnProvider implements IVCProvider {
@@ -44,6 +52,8 @@ export declare class SvnProvider implements IVCProvider {
   finishedWrite(filePath: string): VCResult;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
+  renameFile(oldPath: string, newPath: string): VCResult;
+  renameFolder(oldPath: string, newPath: string): VCResult;
 }
 
 export declare class FilesystemProvider implements IVCProvider {
@@ -52,6 +62,8 @@ export declare class FilesystemProvider implements IVCProvider {
   finishedWrite(filePath: string): VCResult;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
+  renameFile(oldPath: string, newPath: string): VCResult;
+  renameFolder(oldPath: string, newPath: string): VCResult;
 }
 
 /**
@@ -76,6 +88,18 @@ export declare function deleteFile(filePath: string): VCResult;
  * Delete a folder and all its contents, marking tracked files for deletion in VC.
  */
 export declare function deleteFolder(folderPath: string): VCResult;
+
+/**
+ * Rename a file, informing VC of the change if the file is tracked.
+ * No-op if the source does not exist.
+ */
+export declare function renameFile(oldPath: string, newPath: string): VCResult;
+
+/**
+ * Rename a folder, informing VC of the change for all tracked contents.
+ * No-op if the source does not exist.
+ */
+export declare function renameFolder(oldPath: string, newPath: string): VCResult;
 
 /**
  * Write text to a file, handling VC checkout and registration automatically.

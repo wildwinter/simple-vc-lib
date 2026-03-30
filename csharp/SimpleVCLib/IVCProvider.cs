@@ -35,4 +35,16 @@ public interface IVCProvider
     /// Delete a folder and all its contents, scheduling tracked files for VC deletion.
     /// </summary>
     VCResult DeleteFolder(string folderPath);
+
+    /// <summary>
+    /// Rename a file, informing VC of the change if the file is tracked.
+    /// No-op if the source does not exist.
+    /// </summary>
+    VCResult RenameFile(string oldPath, string newPath);
+
+    /// <summary>
+    /// Rename a folder, informing VC of the change for all tracked contents.
+    /// No-op if the source does not exist.
+    /// </summary>
+    VCResult RenameFolder(string oldPath, string newPath);
 }

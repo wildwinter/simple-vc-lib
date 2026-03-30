@@ -50,6 +50,14 @@ public static class VCLib
     public static VCResult DeleteFolder(string folderPath) =>
         GetProvider(folderPath).DeleteFolder(folderPath);
 
+    /// <inheritdoc cref="IVCProvider.RenameFile"/>
+    public static VCResult RenameFile(string oldPath, string newPath) =>
+        GetProvider(oldPath).RenameFile(oldPath, newPath);
+
+    /// <inheritdoc cref="IVCProvider.RenameFolder"/>
+    public static VCResult RenameFolder(string oldPath, string newPath) =>
+        GetProvider(oldPath).RenameFolder(oldPath, newPath);
+
     /// <summary>
     /// Write text to a file, handling VC checkout and registration automatically.
     /// Calls <see cref="PrepareToWrite"/>, writes the file, then calls <see cref="FinishedWrite"/>.

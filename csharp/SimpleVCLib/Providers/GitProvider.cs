@@ -60,6 +60,27 @@ public class GitProvider : IVCProvider
         return VCResult.Ok();
     }
 
+    public VCResult RenameFile(string oldPath, string newPath)
+    {
+        if (!File.Exists(oldPath)) return VCResult.Ok();
+        if (IsTracked(oldPath))
+        {
+            var result = Git(["mv", oldPath, newPath], Path.GetDirectoryName(oldPath)!);
+            if (result.ExitCode == 0) return VCResult.Ok();
+            return VCResult.Error($"Cannot rename '{oldPath}' in git: {result.Error ?? result.Output}");
+        }
+        return _fs.RenameFile(oldPath, newPath);
+    }
+
+    public VCResult RenameFolder(string oldPath, string newPath)
+    {
+        if (!Directory.Exists(oldPath)) return VCResult.Ok();
+        var result = Git(["mv", oldPath, newPath], Path.GetDirectoryName(oldPath)!);
+        if (result.ExitCode == 0) return VCResult.Ok();
+        // Fall back to filesystem rename for untracked folders.
+        return _fs.RenameFolder(oldPath, newPath);
+    }
+
     // -------------------------------------------------------------------------
 
     private static bool IsTracked(string filePath)

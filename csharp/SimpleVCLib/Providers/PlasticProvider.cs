@@ -72,6 +72,30 @@ public class PlasticProvider : IVCProvider
         return VCResult.Ok();
     }
 
+    public VCResult RenameFile(string oldPath, string newPath)
+    {
+        if (!File.Exists(oldPath)) return VCResult.Ok();
+        if (IsTracked(oldPath))
+        {
+            var result = Cm(["mv", oldPath, newPath]);
+            if (result.ExitCode == 0) return VCResult.Ok();
+            return VCResult.Error($"Cannot rename '{oldPath}' in Plastic SCM: {result.Error ?? result.Output}");
+        }
+        return _fs.RenameFile(oldPath, newPath);
+    }
+
+    public VCResult RenameFolder(string oldPath, string newPath)
+    {
+        if (!Directory.Exists(oldPath)) return VCResult.Ok();
+        if (IsTracked(oldPath))
+        {
+            var result = Cm(["mv", oldPath, newPath]);
+            if (result.ExitCode == 0) return VCResult.Ok();
+            return VCResult.Error($"Cannot rename folder '{oldPath}' in Plastic SCM: {result.Error ?? result.Output}");
+        }
+        return _fs.RenameFolder(oldPath, newPath);
+    }
+
     // -------------------------------------------------------------------------
 
     private static bool IsTracked(string path)

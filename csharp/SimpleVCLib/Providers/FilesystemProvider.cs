@@ -61,4 +61,32 @@ public class FilesystemProvider : IVCProvider
             return VCResult.Error($"Cannot delete folder '{folderPath}': {ex.Message}");
         }
     }
+
+    public VCResult RenameFile(string oldPath, string newPath)
+    {
+        if (!File.Exists(oldPath)) return VCResult.Ok();
+        try
+        {
+            File.Move(oldPath, newPath);
+            return VCResult.Ok();
+        }
+        catch (Exception ex)
+        {
+            return VCResult.Error($"Cannot rename '{oldPath}' to '{newPath}': {ex.Message}");
+        }
+    }
+
+    public VCResult RenameFolder(string oldPath, string newPath)
+    {
+        if (!Directory.Exists(oldPath)) return VCResult.Ok();
+        try
+        {
+            Directory.Move(oldPath, newPath);
+            return VCResult.Ok();
+        }
+        catch (Exception ex)
+        {
+            return VCResult.Error($"Cannot rename folder '{oldPath}' to '{newPath}': {ex.Message}");
+        }
+    }
 }

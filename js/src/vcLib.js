@@ -101,6 +101,28 @@ export function deleteFolder(folderPath) {
 }
 
 /**
+ * Rename a file, informing VC of the change if the file is tracked.
+ * No-op if the source does not exist.
+ *
+ * @param {string} oldPath
+ * @param {string} newPath
+ */
+export function renameFile(oldPath, newPath) {
+  return resolveProvider(oldPath).renameFile(oldPath, newPath);
+}
+
+/**
+ * Rename a folder, informing VC of the change for all tracked contents.
+ * No-op if the source does not exist.
+ *
+ * @param {string} oldPath
+ * @param {string} newPath
+ */
+export function renameFolder(oldPath, newPath) {
+  return resolveProvider(oldPath).renameFolder(oldPath, newPath);
+}
+
+/**
  * Write text to a file, handling VC checkout and registration automatically.
  * Calls `prepareToWrite`, writes the file, then calls `finishedWrite`.
  * Works whether or not the file already exists.

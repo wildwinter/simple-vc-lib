@@ -77,6 +77,26 @@ export class PlasticProvider {
     }
   }
 
+  renameFile(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    if (isTracked(oldPath)) {
+      const result = cm(['mv', oldPath, newPath]);
+      if (result.exitCode === 0) return okResult();
+      return errorResult('error', `Cannot rename '${oldPath}' in Plastic SCM: ${result.error || result.output}`);
+    }
+    return fs.renameFile(oldPath, newPath);
+  }
+
+  renameFolder(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    if (isTracked(oldPath)) {
+      const result = cm(['mv', oldPath, newPath]);
+      if (result.exitCode === 0) return okResult();
+      return errorResult('error', `Cannot rename folder '${oldPath}' in Plastic SCM: ${result.error || result.output}`);
+    }
+    return fs.renameFolder(oldPath, newPath);
+  }
+
   deleteFolder(folderPath) {
     if (!existsSync(folderPath)) return okResult();
 

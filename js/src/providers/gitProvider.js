@@ -1,4 +1,4 @@
-import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, constants } from 'fs';
+import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, renameSync, constants } from 'fs';
 import { dirname } from 'path';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
@@ -75,6 +75,34 @@ export class GitProvider {
       return okResult();
     } catch (e) {
       return errorResult('error', `Failed to delete file: ${e.message}`);
+    }
+  }
+
+  renameFile(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    if (isTracked(oldPath)) {
+      const result = git(['mv', oldPath, newPath], dirname(oldPath));
+      if (result.exitCode === 0) return okResult();
+      return errorResult('error', `Cannot rename '${oldPath}' in git: ${result.error || result.output}`);
+    }
+    try {
+      renameSync(oldPath, newPath);
+      return okResult();
+    } catch (e) {
+      return errorResult('error', `Cannot rename '${oldPath}': ${e.message}`);
+    }
+  }
+
+  renameFolder(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    const result = git(['mv', oldPath, newPath], dirname(oldPath));
+    if (result.exitCode === 0) return okResult();
+    // Fall back to filesystem rename for untracked folders.
+    try {
+      renameSync(oldPath, newPath);
+      return okResult();
+    } catch (e) {
+      return errorResult('error', `Cannot rename folder '${oldPath}': ${e.message}`);
     }
   }
 

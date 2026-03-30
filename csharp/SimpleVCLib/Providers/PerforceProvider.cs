@@ -70,6 +70,41 @@ public class PerforceProvider : IVCProvider
         return VCResult.Ok();
     }
 
+    public VCResult RenameFile(string oldPath, string newPath)
+    {
+        if (!File.Exists(oldPath)) return VCResult.Ok();
+        if (IsInDepot(oldPath))
+        {
+            var result = P4(["move", oldPath, newPath]);
+            if (result.ExitCode == 0) return VCResult.Ok();
+            return VCResult.Error($"Cannot rename '{oldPath}' in Perforce: {result.Error ?? result.Output}");
+        }
+        return _fs.RenameFile(oldPath, newPath);
+    }
+
+    public VCResult RenameFolder(string oldPath, string newPath)
+    {
+        if (!Directory.Exists(oldPath)) return VCResult.Ok();
+        // p4 move with /... wildcard handles tracked files and physically moves them.
+        var src = oldPath.Replace('\\', '/') + "/...";
+        var dst = newPath.Replace('\\', '/') + "/...";
+        P4(["move", src, dst]);
+        // Move any untracked files that p4 left behind.
+        if (Directory.Exists(oldPath))
+        {
+            try
+            {
+                CopyDirectory(oldPath, newPath);
+                Directory.Delete(oldPath, recursive: true);
+            }
+            catch (Exception ex)
+            {
+                return VCResult.Error($"Cannot rename folder '{oldPath}': {ex.Message}");
+            }
+        }
+        return VCResult.Ok();
+    }
+
     // -------------------------------------------------------------------------
 
     private static string? Fstat(string filePath)
@@ -83,4 +118,13 @@ public class PerforceProvider : IVCProvider
 
     private static CommandRunner.Result P4(string[] args) =>
         CommandRunner.Run("p4", args);
+
+    private static void CopyDirectory(string src, string dst)
+    {
+        Directory.CreateDirectory(dst);
+        foreach (var file in Directory.EnumerateFiles(src))
+            File.Copy(file, Path.Combine(dst, Path.GetFileName(file)), overwrite: true);
+        foreach (var dir in Directory.EnumerateDirectories(src))
+            CopyDirectory(dir, Path.Combine(dst, Path.GetFileName(dir)));
+    }
 }

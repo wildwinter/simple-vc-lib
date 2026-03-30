@@ -5,7 +5,7 @@ import { join } from 'path';
 import { spawnSync } from 'child_process';
 
 import {
-  prepareToWrite, finishedWrite, deleteFile, deleteFolder,
+  prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder,
   setProvider, clearProvider,
   GitProvider, FilesystemProvider, SvnProvider,
 } from '../src/index.js';
@@ -126,6 +126,39 @@ describe('FilesystemProvider', () => {
     const result = deleteFolder(join(tempDir, 'nonexistent'));
     assert.isTrue(result.success);
   });
+
+  it('renameFile moves the file to the new path', () => {
+    const oldPath = join(tempDir, 'original.txt');
+    const newPath = join(tempDir, 'renamed.txt');
+    writeFileSync(oldPath, 'content');
+
+    const result = renameFile(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(newPath));
+  });
+
+  it('renameFile on a missing file returns ok', () => {
+    const result = renameFile(join(tempDir, 'ghost.txt'), join(tempDir, 'other.txt'));
+    assert.isTrue(result.success);
+  });
+
+  it('renameFolder moves the folder to the new path', () => {
+    const oldPath = join(tempDir, 'oldfolder');
+    const newPath = join(tempDir, 'newfolder');
+    mkdirSync(oldPath);
+    writeFileSync(join(oldPath, 'a.txt'), 'a');
+
+    const result = renameFolder(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(join(newPath, 'a.txt')));
+  });
+
+  it('renameFolder on a missing folder returns ok', () => {
+    const result = renameFolder(join(tempDir, 'nonexistent'), join(tempDir, 'other'));
+    assert.isTrue(result.success);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -206,6 +239,51 @@ describe('GitProvider', () => {
     const result = deleteFile(filePath);
     assert.isTrue(result.success, result.message);
     assert.isFalse(existsSync(filePath));
+  });
+
+  it('renameFile renames an untracked file on disk', () => {
+    const oldPath = join(repoDir, 'torename.txt');
+    const newPath = join(repoDir, 'renamed.txt');
+    writeFileSync(oldPath, 'content');
+
+    const result = renameFile(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(newPath));
+  });
+
+  it('renameFile renames a tracked file via git mv', () => {
+    const oldPath = join(repoDir, 'tracked-rename.txt');
+    const newPath = join(repoDir, 'tracked-renamed.txt');
+    writeFileSync(oldPath, 'hello');
+    spawnSync('git', ['add', oldPath], { cwd: repoDir });
+    spawnSync('git', ['commit', '-m', 'add tracked-rename'], { cwd: repoDir, encoding: 'utf8' });
+
+    const result = renameFile(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(newPath));
+
+    // Verify the new path is tracked in git's index (git mv was used, not a plain fs rename).
+    const lsResult = spawnSync('git', ['ls-files', '--error-unmatch', newPath], { cwd: repoDir, encoding: 'utf8' });
+    assert.equal(lsResult.status, 0, 'renamed file should be in git index');
+  });
+
+  it('renameFolder renames a folder with mixed tracked/untracked files', () => {
+    const oldPath = join(repoDir, 'folder-to-rename');
+    const newPath = join(repoDir, 'folder-renamed');
+    mkdirSync(oldPath);
+    const tracked = join(oldPath, 'tracked.txt');
+    const untracked = join(oldPath, 'untracked.txt');
+    writeFileSync(tracked, 'tracked');
+    writeFileSync(untracked, 'untracked');
+    spawnSync('git', ['add', tracked], { cwd: repoDir });
+
+    const result = renameFolder(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(join(newPath, 'tracked.txt')));
+    assert.isTrue(existsSync(join(newPath, 'untracked.txt')));
   });
 
   it('deleteFolder removes a folder with mixed tracked/untracked files', () => {
@@ -291,6 +369,36 @@ describe('SvnProvider', function () {
     const result = deleteFolder(dirPath);
     assert.isTrue(result.success, result.message);
     assert.isFalse(existsSync(dirPath));
+  });
+
+  it('renameFile renames a committed file via svn move', () => {
+    const oldPath = join(wcDir, 'svn-rename-src.txt');
+    const newPath = join(wcDir, 'svn-rename-dst.txt');
+    writeFileSync(oldPath, 'hello');
+    spawnSync('svn', ['add', oldPath], { encoding: 'utf8' });
+    spawnSync('svn', ['commit', '-m', 'add rename-src', '--username', 'test', '--no-auth-cache'], { cwd: wcDir, encoding: 'utf8' });
+
+    const result = renameFile(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(newPath));
+
+    const status = spawnSync('svn', ['status', newPath], { encoding: 'utf8' });
+    assert.match(status.stdout.trim(), /^A/);
+  });
+
+  it('renameFolder renames a committed folder via svn move', () => {
+    const oldPath = join(wcDir, 'svn-rename-dir');
+    const newPath = join(wcDir, 'svn-rename-dir-dst');
+    mkdirSync(oldPath);
+    writeFileSync(join(oldPath, 'f.txt'), 'x');
+    spawnSync('svn', ['add', oldPath], { encoding: 'utf8' });
+    spawnSync('svn', ['commit', '-m', 'add rename-dir', '--username', 'test', '--no-auth-cache'], { cwd: wcDir, encoding: 'utf8' });
+
+    const result = renameFolder(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(newPath));
   });
 
   it('auto-detects SVN from .svn directory', () => {

@@ -74,6 +74,30 @@ public class SvnProvider : IVCProvider
         return _fs.DeleteFolder(folderPath);
     }
 
+    public VCResult RenameFile(string oldPath, string newPath)
+    {
+        if (!File.Exists(oldPath)) return VCResult.Ok();
+        if (IsTracked(oldPath))
+        {
+            var result = Svn(["move", "--force", oldPath, newPath]);
+            if (result.ExitCode == 0) return VCResult.Ok();
+            return VCResult.Error($"Cannot rename '{oldPath}' in SVN: {result.Error ?? result.Output}");
+        }
+        return _fs.RenameFile(oldPath, newPath);
+    }
+
+    public VCResult RenameFolder(string oldPath, string newPath)
+    {
+        if (!Directory.Exists(oldPath)) return VCResult.Ok();
+        if (IsTracked(oldPath))
+        {
+            var result = Svn(["move", "--force", oldPath, newPath]);
+            if (result.ExitCode == 0) return VCResult.Ok();
+            return VCResult.Error($"Cannot rename folder '{oldPath}' in SVN: {result.Error ?? result.Output}");
+        }
+        return _fs.RenameFolder(oldPath, newPath);
+    }
+
     // -------------------------------------------------------------------------
 
     private static bool IsTracked(string path)

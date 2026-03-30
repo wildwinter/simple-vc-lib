@@ -1,4 +1,4 @@
-export { prepareToWrite, finishedWrite, deleteFile, deleteFolder, writeTextFile, writeBinaryFile, setProvider, clearProvider } from './vcLib.js';
+export { prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder, writeTextFile, writeBinaryFile, setProvider, clearProvider } from './vcLib.js';
 export { GitProvider } from './providers/gitProvider.js';
 export { PerforceProvider } from './providers/perforceProvider.js';
 export { PlasticProvider } from './providers/plasticProvider.js';

@@ -1,4 +1,4 @@
-import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, constants } from 'fs';
+import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, renameSync, constants } from 'fs';
 import { okResult, errorResult } from '../vcResult.js';
 
 function isWritable(filePath) {
@@ -57,6 +57,26 @@ export class FilesystemProvider {
       return okResult();
     } catch (e) {
       return errorResult('error', `Cannot delete folder '${folderPath}': ${e.message}`);
+    }
+  }
+
+  renameFile(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    try {
+      renameSync(oldPath, newPath);
+      return okResult();
+    } catch (e) {
+      return errorResult('error', `Cannot rename '${oldPath}' to '${newPath}': ${e.message}`);
+    }
+  }
+
+  renameFolder(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    try {
+      renameSync(oldPath, newPath);
+      return okResult();
+    } catch (e) {
+      return errorResult('error', `Cannot rename folder '${oldPath}' to '${newPath}': ${e.message}`);
     }
   }
 }

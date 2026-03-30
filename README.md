@@ -39,6 +39,14 @@ VCLib.DeleteFile("/path/to/old-dialogue.json");
 * [Usage](#usage)
     * [Overview](#overview)
     * [Operations](#operations)
+        * [writeTextFile](#writetextfilepath-content-encoding)
+        * [writeBinaryFile](#writebinaryfilepath-data)
+        * [prepareToWrite](#preparetowritefilepath)
+        * [finishedWrite](#finishedwritefilepath)
+        * [deleteFile](#deletefilefilepath)
+        * [deleteFolder](#deletefolderfolderpath)
+        * [renameFile](#renamefileoldpath-newpath)
+        * [renameFolder](#renamefolderoldpath-newpath)
     * [Return Values](#return-values)
     * [VC Detection](#vc-detection)
     * [Overriding VC Detection](#overriding-vc-detection)
@@ -114,6 +122,12 @@ Deletes a file, scheduling it for deletion in VC if it is tracked.
 #### `deleteFolder(folderPath)`
 Deletes a folder and all its contents. Tracked files are scheduled for VC deletion; untracked files are deleted from disk.
 
+#### `renameFile(oldPath, newPath)`
+Renames (moves) a file, informing VC of the change if the file is tracked (`git mv`, `p4 move`, `cm mv`, `svn move`). Untracked files are renamed on disk only. No-op if the source does not exist.
+
+#### `renameFolder(oldPath, newPath)`
+Renames (moves) a folder, informing VC of the change for all tracked contents. Untracked content is moved on disk. No-op if the source does not exist.
+
 ### Return Values
 All operations return a result object with three fields:
 
@@ -172,10 +186,10 @@ Or download `simpleVcLib.js` (ESM) or `simpleVcLib.cjs` (CommonJS) from the [Git
 
 ```javascript
 // ESM (npm)
-import { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite, deleteFile, deleteFolder } from '@wildwinter/simple-vc-lib';
+import { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from '@wildwinter/simple-vc-lib';
 
 // ESM (direct file)
-import { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite, deleteFile, deleteFolder } from './simpleVcLib.js';
+import { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from './simpleVcLib.js';
 
 // All-in-one helpers (checkout + write + add to VC)
 const result = writeTextFile('/path/to/myfile.json', JSON.stringify(data), 'utf8');
@@ -188,6 +202,14 @@ const binResult = writeBinaryFile('/path/to/myfile.bin', buffer);
 if (!binResult.success) {
     console.error(binResult.message);
 }
+
+// Renaming
+const renResult = renameFile('/path/to/old-name.json', '/path/to/new-name.json');
+if (!renResult.success) {
+    console.error(renResult.message);
+}
+
+renameFolder('/path/to/old-folder', '/path/to/new-folder');
 
 // Manual approach — if you need to write the file yourself
 const prep = prepareToWrite('/path/to/myfile.json');
@@ -251,6 +273,13 @@ if (!add.Success)
 var del = VCLib.DeleteFolder("/path/to/old-content/");
 if (!del.Success)
     Console.WriteLine(del.Message);
+
+// Renaming
+var ren = VCLib.RenameFile("/path/to/old-name.json", "/path/to/new-name.json");
+if (!ren.Success)
+    Console.WriteLine(ren.Message);
+
+VCLib.RenameFolder("/path/to/old-folder", "/path/to/new-folder");
 ```
 
 ## Contributors
