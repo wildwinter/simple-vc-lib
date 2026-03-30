@@ -20,10 +20,24 @@ function fstat(filePath) {
 
 function isInDepot(filePath) {
   const info = fstat(filePath);
+  if (info === null) return false;
+
   // p4 fstat exits 0 for workspace-mapped files even if never submitted to the depot,
   // returning only clientFile/isMapped. Only treat the file as depot-tracked when
   // depot metadata (headRev or depotFile) is present.
-  return info !== null && (info.includes('headRev') || info.includes('depotFile'));
+  const hasDepotFile = info.includes('headRev') || info.includes('depotFile');
+  if (!hasDepotFile) return false;
+
+  // If the file was submitted as deleted at head revision, it's effectively untracked
+  // unless it is currently reopened in a changelist.
+  const isDeletedAtHead = info.includes('headAction delete') || info.includes('headAction move/delete');
+  const isOpened = info.includes('... action ');
+
+  if (isDeletedAtHead && !isOpened) {
+    return false;
+  }
+
+  return true;
 }
 
 /**
@@ -97,8 +111,10 @@ export class PerforceProvider {
   renameFile(oldPath, newPath) {
     if (!existsSync(oldPath)) return okResult();
     if (isInDepot(oldPath)) {
+      p4(['edit', oldPath]);
       const result = p4(['move', oldPath, newPath]);
-      if (result.exitCode === 0) return okResult();
+      const combined = ((result.output || '') + ' ' + (result.error || '')).toLowerCase();
+      if (result.exitCode === 0 && !combined.includes('not opened for')) return okResult();
       return errorResult('error', `Cannot rename '${oldPath}' in Perforce: ${result.error || result.output}`);
     }
     return fs.renameFile(oldPath, newPath);
@@ -109,6 +125,7 @@ export class PerforceProvider {
     // p4 move with /... wildcard handles tracked files and physically moves them.
     const src = oldPath.replace(/\\/g, '/') + '/...';
     const dst = newPath.replace(/\\/g, '/') + '/...';
+    p4(['edit', src]);
     p4(['move', src, dst]);
     // Move any untracked files that p4 left behind.
     if (existsSync(oldPath)) {

@@ -89,8 +89,10 @@ public class PerforceProvider : IVCProvider
         if (!File.Exists(oldPath)) return VCResult.Ok();
         if (IsInDepot(oldPath))
         {
+            P4(["edit", oldPath]);
             var result = P4(["move", oldPath, newPath]);
-            if (result.ExitCode == 0) return VCResult.Ok();
+            var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+            if (result.ExitCode == 0 && !combined.Contains("not opened for")) return VCResult.Ok();
             return VCResult.Error($"Cannot rename '{oldPath}' in Perforce: {result.Error ?? result.Output}");
         }
         return _fs.RenameFile(oldPath, newPath);
@@ -102,6 +104,7 @@ public class PerforceProvider : IVCProvider
         // p4 move with /... wildcard handles tracked files and physically moves them.
         var src = oldPath.Replace('\\', '/') + "/...";
         var dst = newPath.Replace('\\', '/') + "/...";
+        P4(["edit", src]);
         P4(["move", src, dst]);
         // Move any untracked files that p4 left behind.
         if (Directory.Exists(oldPath))
@@ -130,10 +133,22 @@ public class PerforceProvider : IVCProvider
     private static bool IsInDepot(string filePath)
     {
         var fstat = Fstat(filePath);
+        if (fstat is null) return false;
+
         // p4 fstat exits 0 for workspace-mapped files even if never submitted to the depot,
         // returning only clientFile/isMapped. Only treat the file as depot-tracked when
         // depot metadata (headRev or depotFile) is present.
-        return fstat is not null && (fstat.Contains("headRev") || fstat.Contains("depotFile"));
+        var hasDepotFile = fstat.Contains("headRev") || fstat.Contains("depotFile");
+        if (!hasDepotFile) return false;
+
+        // If the file was submitted as deleted at head revision, it's effectively untracked
+        // unless it is currently reopened in a changelist.
+        var isDeletedAtHead = fstat.Contains("headAction delete") || fstat.Contains("headAction move/delete");
+        var isOpened = fstat.Contains("... action ");
+
+        if (isDeletedAtHead && !isOpened) return false;
+
+        return true;
     }
 
     private static CommandRunner.Result P4(string[] args) =>
