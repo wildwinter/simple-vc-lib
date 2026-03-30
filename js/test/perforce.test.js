@@ -60,8 +60,13 @@ function workspaceRoot() {
  */
 function submitFile(filePath, content = 'test content') {
   writeFileSync(filePath, content);
-  p4(['add', filePath]);
-  p4(['submit', '-d', `add ${filePath} (simple-vc-lib test)`]);
+  const addResult = p4(['add', filePath]);
+  assert.equal(addResult.status, 0,
+    `p4 add failed for '${filePath}' — is the path mapped in your workspace?\n${addResult.stderr || addResult.stdout}`);
+  const submitResult = p4(['submit', '-d', `add ${filePath} (simple-vc-lib test)`]);
+  assert.equal(submitResult.status, 0,
+    `p4 submit failed for '${filePath}'\n${submitResult.stderr || submitResult.stdout}`);
+  // After submit the file is read-only on disk — standard Perforce behaviour.
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +120,7 @@ describe('PerforceProvider', function () {
 
     // Verify the file is now open for edit in Perforce.
     const fstat = p4(['fstat', filePath]);
-    assert.include(fstat.stdout, 'action', 'fstat should report an open action after prepareToWrite');
+    assert.include(fstat.stdout + fstat.stderr, 'action', 'fstat should report an open action after prepareToWrite');
   });
 
   it('prepareToWrite on a new (untracked) file returns ok', function () {
@@ -132,7 +137,7 @@ describe('PerforceProvider', function () {
 
     // Verify the file is open for add in Perforce.
     const fstat = p4(['fstat', filePath]);
-    assert.include(fstat.stdout, 'add', 'fstat should report open for add after finishedWrite');
+    assert.include(fstat.stdout + fstat.stderr, 'add', 'fstat should report open for add after finishedWrite');
   });
 
   it('writeTextFile checks out, writes, and leaves file open for edit', function () {
@@ -152,9 +157,9 @@ describe('PerforceProvider', function () {
     assert.isTrue(result.success, result.message);
     assert.isFalse(existsSync(filePath));
 
-    // Verify it is open for delete in Perforce.
-    const fstat = p4(['fstat', filePath]);
-    assert.include(fstat.stdout, 'delete', 'fstat should report open for delete');
+    // Verify it is open for delete in Perforce (file is physically gone but still pending in the changelist).
+    const fstat = p4(['fstat', '-Od', filePath]);
+    assert.include(fstat.stdout + fstat.stderr, 'delete', 'fstat should report open for delete');
   });
 
   it('deleteFile removes an untracked file from disk only', function () {
@@ -178,7 +183,7 @@ describe('PerforceProvider', function () {
 
     // The destination should be open for add (as part of the p4 move operation).
     const fstat = p4(['fstat', newPath]);
-    assert.include(fstat.stdout, 'add', 'destination should be open for add after p4 move');
+    assert.include(fstat.stdout + fstat.stderr, 'add', 'destination should be open for add after p4 move');
   });
 
   it('renameFolder moves a submitted folder via p4 move', function () {

@@ -1,4 +1,4 @@
-import { existsSync, unlinkSync, rmSync, cpSync, mkdirSync } from 'fs';
+import { existsSync, unlinkSync, chmodSync, rmSync, cpSync, mkdirSync } from 'fs';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { FilesystemProvider } from './filesystemProvider.js';
@@ -19,7 +19,11 @@ function fstat(filePath) {
 }
 
 function isInDepot(filePath) {
-  return fstat(filePath) !== null;
+  const info = fstat(filePath);
+  // p4 fstat exits 0 for workspace-mapped files even if never submitted to the depot,
+  // returning only clientFile/isMapped. Only treat the file as depot-tracked when
+  // depot metadata (headRev or depotFile) is present.
+  return info !== null && (info.includes('headRev') || info.includes('depotFile'));
 }
 
 /**
@@ -68,8 +72,19 @@ export class PerforceProvider {
 
     if (isInDepot(filePath)) {
       const result = p4(['delete', filePath]);
-      if (result.exitCode === 0) return okResult();
-      return errorResult('error', `Cannot delete '${filePath}' from Perforce: ${result.error || result.output}`);
+      if (result.exitCode !== 0)
+        return errorResult('error', `Cannot delete '${filePath}' from Perforce: ${result.error || result.output}`);
+      // p4 delete marks for deletion but leaves the file on disk as read-only.
+      // Physically remove it, consistent with git rm and svn delete.
+      try {
+        if (existsSync(filePath)) {
+          chmodSync(filePath, 0o666);
+          unlinkSync(filePath);
+        }
+      } catch (e) {
+        return errorResult('error', `Cannot remove '${filePath}' from disk: ${e.message}`);
+      }
+      return okResult();
     }
 
     try {

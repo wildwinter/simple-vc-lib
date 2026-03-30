@@ -49,8 +49,23 @@ public class PerforceProvider : IVCProvider
         if (IsInDepot(filePath))
         {
             var result = P4(["delete", filePath]);
-            if (result.ExitCode == 0) return VCResult.Ok();
-            return VCResult.Error($"Cannot delete '{filePath}' from Perforce: {result.Error ?? result.Output}");
+            if (result.ExitCode != 0)
+                return VCResult.Error($"Cannot delete '{filePath}' from Perforce: {result.Error ?? result.Output}");
+            // p4 delete marks for deletion but leaves the file on disk as read-only.
+            // Physically remove it, consistent with git rm and svn delete.
+            if (File.Exists(filePath))
+            {
+                try
+                {
+                    new FileInfo(filePath).IsReadOnly = false;
+                    File.Delete(filePath);
+                }
+                catch (Exception ex)
+                {
+                    return VCResult.Error($"Cannot remove '{filePath}' from disk: {ex.Message}");
+                }
+            }
+            return VCResult.Ok();
         }
 
         return _fs.DeleteFile(filePath);
@@ -113,8 +128,14 @@ public class PerforceProvider : IVCProvider
         return result.ExitCode == 0 ? result.Output : null;
     }
 
-    private static bool IsInDepot(string filePath) =>
-        Fstat(filePath) is not null;
+    private static bool IsInDepot(string filePath)
+    {
+        var fstat = Fstat(filePath);
+        // p4 fstat exits 0 for workspace-mapped files even if never submitted to the depot,
+        // returning only clientFile/isMapped. Only treat the file as depot-tracked when
+        // depot metadata (headRev or depotFile) is present.
+        return fstat is not null && (fstat.Contains("headRev") || fstat.Contains("depotFile"));
+    }
 
     private static CommandRunner.Result P4(string[] args) =>
         CommandRunner.Run("p4", args);
