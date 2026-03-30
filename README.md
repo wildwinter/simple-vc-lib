@@ -81,6 +81,8 @@ Both are cross-platform (macOS Arm64 and Windows x64).
 
 The library calls the relevant CLI under the hood. The appropriate CLI tool must be installed and on the system PATH.
 
+**NOTE:** I haven't been able to test Plastic SCM fully yet. Please let me know if you have any issues with it.
+
 ## Usage
 
 ### Overview
