@@ -1,11 +1,12 @@
 import { assert } from 'chai';
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync } from 'fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, chmodSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 
 import {
   prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder,
+  writeTextFile, writeBinaryFile,
   setProvider, clearProvider,
   GitProvider, FilesystemProvider, SvnProvider,
 } from '../src/index.js';
@@ -41,6 +42,123 @@ function initGitRepo(dir) {
   run(['add', 'README.md']);
   run(['commit', '-m', 'init']);
 }
+
+// ---------------------------------------------------------------------------
+// writeTextFile / writeBinaryFile — no-change optimisation
+// ---------------------------------------------------------------------------
+
+describe('writeTextFile / writeBinaryFile (no-change optimisation)', () => {
+  let tempDir;
+
+  beforeEach(() => {
+    tempDir = makeTempDir();
+    setProvider(new FilesystemProvider());
+  });
+
+  afterEach(() => {
+    clearProvider();
+  });
+
+  // --- writeTextFile ---
+
+  it('writeTextFile writes a new file normally', () => {
+    const filePath = join(tempDir, 'new.txt');
+    const result = writeTextFile(filePath, 'hello');
+    assert.isTrue(result.success, result.message);
+    assert.equal(result.status, 'ok');
+    assert.equal(readFileSync(filePath, 'utf8'), 'hello');
+  });
+
+  it('writeTextFile skips write and VCS ops when content is unchanged', () => {
+    const filePath = join(tempDir, 'unchanged.txt');
+    writeFileSync(filePath, 'same content');
+    const mtimeBefore = statSync(filePath).mtimeMs;
+
+    const result = writeTextFile(filePath, 'same content');
+    assert.isTrue(result.success, result.message);
+    assert.equal(result.status, 'ok');
+    // mtime must not change — file was not rewritten.
+    assert.equal(statSync(filePath).mtimeMs, mtimeBefore, 'file should not be rewritten');
+  });
+
+  it('writeTextFile writes when content has changed', () => {
+    const filePath = join(tempDir, 'changed.txt');
+    writeFileSync(filePath, 'old content');
+
+    const result = writeTextFile(filePath, 'new content');
+    assert.isTrue(result.success, result.message);
+    assert.equal(readFileSync(filePath, 'utf8'), 'new content');
+  });
+
+  it('writeTextFile with forceWrite=true always writes even when content is unchanged', () => {
+    const filePath = join(tempDir, 'force.txt');
+    writeFileSync(filePath, 'same content');
+    const mtimeBefore = statSync(filePath).mtimeMs;
+
+    // Small delay to ensure mtime resolution can differ.
+    const start = Date.now();
+    while (Date.now() - start < 10) { /* spin */ }
+
+    const result = writeTextFile(filePath, 'same content', 'utf8', true);
+    assert.isTrue(result.success, result.message);
+    assert.notEqual(statSync(filePath).mtimeMs, mtimeBefore, 'file should be rewritten with forceWrite');
+  });
+
+  // --- writeBinaryFile ---
+
+  it('writeBinaryFile writes a new file normally', () => {
+    const filePath = join(tempDir, 'new.bin');
+    const data = Buffer.from([1, 2, 3]);
+    const result = writeBinaryFile(filePath, data);
+    assert.isTrue(result.success, result.message);
+    assert.deepEqual([...readFileSync(filePath)], [1, 2, 3]);
+  });
+
+  it('writeBinaryFile skips write and VCS ops when content is unchanged', () => {
+    const filePath = join(tempDir, 'unchanged.bin');
+    writeFileSync(filePath, Buffer.from([1, 2, 3]));
+    const mtimeBefore = statSync(filePath).mtimeMs;
+
+    const result = writeBinaryFile(filePath, Buffer.from([1, 2, 3]));
+    assert.isTrue(result.success, result.message);
+    assert.equal(statSync(filePath).mtimeMs, mtimeBefore, 'file should not be rewritten');
+  });
+
+  it('writeBinaryFile writes when content has changed', () => {
+    const filePath = join(tempDir, 'changed.bin');
+    writeFileSync(filePath, Buffer.from([1, 2, 3]));
+
+    const result = writeBinaryFile(filePath, Buffer.from([4, 5, 6]));
+    assert.isTrue(result.success, result.message);
+    assert.deepEqual([...readFileSync(filePath)], [4, 5, 6]);
+  });
+
+  it('writeBinaryFile with forceWrite=true always writes even when content is unchanged', () => {
+    const filePath = join(tempDir, 'force.bin');
+    writeFileSync(filePath, Buffer.from([1, 2, 3]));
+    const mtimeBefore = statSync(filePath).mtimeMs;
+
+    const start = Date.now();
+    while (Date.now() - start < 10) { /* spin */ }
+
+    const result = writeBinaryFile(filePath, Buffer.from([1, 2, 3]), true);
+    assert.isTrue(result.success, result.message);
+    assert.notEqual(statSync(filePath).mtimeMs, mtimeBefore, 'file should be rewritten with forceWrite');
+  });
+
+  it('writeTextFile skips VCS checkout on read-only file when content is unchanged', () => {
+    const filePath = join(tempDir, 'readonly-same.txt');
+    writeFileSync(filePath, 'content');
+    chmodSync(filePath, 0o444);
+
+    // With no-change optimisation, the read-only file should not be touched.
+    const result = writeTextFile(filePath, 'content');
+    assert.isTrue(result.success, result.message);
+    // File must still be read-only — prepareToWrite was never called.
+    const mode = statSync(filePath).mode;
+    assert.notOk(mode & 0o200, 'file should remain read-only when content is unchanged');
+  });
+});
 
 // ---------------------------------------------------------------------------
 // FilesystemProvider tests

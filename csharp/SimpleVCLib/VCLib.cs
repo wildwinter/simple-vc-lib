@@ -1,4 +1,5 @@
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace SimpleVCLib;
@@ -62,18 +63,37 @@ public static class VCLib
     /// Write text to a file, handling VC checkout and registration automatically.
     /// Calls <see cref="PrepareToWrite"/>, writes the file, then calls <see cref="FinishedWrite"/>.
     /// Works whether or not the file already exists.
+    /// <para>
+    /// If the file already exists and its content matches <paramref name="content"/>, no VCS
+    /// operations are performed and the file is not written. Set <paramref name="forceWrite"/>
+    /// to <c>true</c> to skip this check and always write.
+    /// </para>
     /// On failure, returns the result from whichever step failed.
     /// </summary>
     /// <param name="filePath">Path to write.</param>
     /// <param name="content">Text content to write.</param>
     /// <param name="encoding">Text encoding to use; defaults to UTF-8 without BOM.</param>
-    public static VCResult WriteTextFile(string filePath, string content, Encoding? encoding = null)
+    /// <param name="forceWrite">When <c>true</c>, always write even if content is unchanged.</param>
+    public static VCResult WriteTextFile(string filePath, string content, Encoding? encoding = null, bool forceWrite = false)
     {
+        var enc = encoding ?? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        if (!forceWrite && File.Exists(filePath))
+        {
+            try
+            {
+                var existing = File.ReadAllText(filePath, enc);
+                if (existing == content) return VCResult.Ok();
+            }
+            catch
+            {
+                // If the file can't be read, fall through to the normal write path.
+            }
+        }
         var prep = GetProvider(filePath).PrepareToWrite(filePath);
         if (!prep.Success) return prep;
         try
         {
-            File.WriteAllText(filePath, content, encoding ?? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.WriteAllText(filePath, content, enc);
         }
         catch (Exception e)
         {
@@ -86,12 +106,30 @@ public static class VCLib
     /// Write binary data to a file, handling VC checkout and registration automatically.
     /// Calls <see cref="PrepareToWrite"/>, writes the file, then calls <see cref="FinishedWrite"/>.
     /// Works whether or not the file already exists.
+    /// <para>
+    /// If the file already exists and its content matches <paramref name="data"/>, no VCS
+    /// operations are performed and the file is not written. Set <paramref name="forceWrite"/>
+    /// to <c>true</c> to skip this check and always write.
+    /// </para>
     /// On failure, returns the result from whichever step failed.
     /// </summary>
     /// <param name="filePath">Path to write.</param>
     /// <param name="data">Binary data to write.</param>
-    public static VCResult WriteBinaryFile(string filePath, byte[] data)
+    /// <param name="forceWrite">When <c>true</c>, always write even if content is unchanged.</param>
+    public static VCResult WriteBinaryFile(string filePath, byte[] data, bool forceWrite = false)
     {
+        if (!forceWrite && File.Exists(filePath))
+        {
+            try
+            {
+                var existing = File.ReadAllBytes(filePath);
+                if (existing.SequenceEqual(data)) return VCResult.Ok();
+            }
+            catch
+            {
+                // If the file can't be read, fall through to the normal write path.
+            }
+        }
         var prep = GetProvider(filePath).PrepareToWrite(filePath);
         if (!prep.Success) return prep;
         try

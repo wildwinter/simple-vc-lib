@@ -247,6 +247,136 @@ public class FilesystemProviderTests : IDisposable
 }
 
 // ---------------------------------------------------------------------------
+// WriteTextFile / WriteBinaryFile — no-change optimisation
+// ---------------------------------------------------------------------------
+
+public class WriteFileNoChangeTests : IDisposable
+{
+    private readonly string _tempDir = TestHelpers.MakeTempDir();
+
+    public WriteFileNoChangeTests() => VCLib.SetProvider(new FilesystemProvider());
+
+    public void Dispose()
+    {
+        VCLib.ClearProvider();
+        foreach (var f in Directory.EnumerateFiles(_tempDir, "*", SearchOption.AllDirectories))
+            new FileInfo(f).IsReadOnly = false;
+        if (Directory.Exists(_tempDir))
+            Directory.Delete(_tempDir, recursive: true);
+    }
+
+    // --- WriteTextFile ---
+
+    [Fact]
+    public void WriteTextFile_NewFile_WritesNormally()
+    {
+        var filePath = Path.Combine(_tempDir, "new.txt");
+        var result = VCLib.WriteTextFile(filePath, "hello");
+        Assert.True(result.Success, result.Message);
+        Assert.Equal("hello", File.ReadAllText(filePath));
+    }
+
+    [Fact]
+    public void WriteTextFile_UnchangedContent_SkipsWriteAndVcsOps()
+    {
+        var filePath = Path.Combine(_tempDir, "unchanged.txt");
+        File.WriteAllText(filePath, "same content");
+        var mtimeBefore = new FileInfo(filePath).LastWriteTimeUtc;
+
+        Thread.Sleep(10); // ensure mtime can differ if file is rewritten
+        var result = VCLib.WriteTextFile(filePath, "same content");
+        Assert.True(result.Success, result.Message);
+        Assert.Equal(mtimeBefore, new FileInfo(filePath).LastWriteTimeUtc);
+    }
+
+    [Fact]
+    public void WriteTextFile_ChangedContent_Writes()
+    {
+        var filePath = Path.Combine(_tempDir, "changed.txt");
+        File.WriteAllText(filePath, "old content");
+
+        var result = VCLib.WriteTextFile(filePath, "new content");
+        Assert.True(result.Success, result.Message);
+        Assert.Equal("new content", File.ReadAllText(filePath));
+    }
+
+    [Fact]
+    public void WriteTextFile_ForceWrite_AlwaysWritesEvenWhenUnchanged()
+    {
+        var filePath = Path.Combine(_tempDir, "force.txt");
+        File.WriteAllText(filePath, "same content");
+        var mtimeBefore = new FileInfo(filePath).LastWriteTimeUtc;
+
+        Thread.Sleep(10);
+        var result = VCLib.WriteTextFile(filePath, "same content", forceWrite: true);
+        Assert.True(result.Success, result.Message);
+        Assert.NotEqual(mtimeBefore, new FileInfo(filePath).LastWriteTimeUtc);
+    }
+
+    [Fact]
+    public void WriteTextFile_ReadOnlyFileUnchangedContent_SkipsPrepareToWrite()
+    {
+        var filePath = Path.Combine(_tempDir, "readonly-same.txt");
+        File.WriteAllText(filePath, "content");
+        TestHelpers.MakeReadOnly(filePath);
+
+        // No-change path should not call PrepareToWrite, so file stays read-only.
+        var result = VCLib.WriteTextFile(filePath, "content");
+        Assert.True(result.Success, result.Message);
+        Assert.True(new FileInfo(filePath).IsReadOnly, "file should remain read-only when content is unchanged");
+    }
+
+    // --- WriteBinaryFile ---
+
+    [Fact]
+    public void WriteBinaryFile_NewFile_WritesNormally()
+    {
+        var filePath = Path.Combine(_tempDir, "new.bin");
+        var data = new byte[] { 1, 2, 3 };
+        var result = VCLib.WriteBinaryFile(filePath, data);
+        Assert.True(result.Success, result.Message);
+        Assert.Equal(data, File.ReadAllBytes(filePath));
+    }
+
+    [Fact]
+    public void WriteBinaryFile_UnchangedContent_SkipsWriteAndVcsOps()
+    {
+        var filePath = Path.Combine(_tempDir, "unchanged.bin");
+        File.WriteAllBytes(filePath, new byte[] { 1, 2, 3 });
+        var mtimeBefore = new FileInfo(filePath).LastWriteTimeUtc;
+
+        Thread.Sleep(10);
+        var result = VCLib.WriteBinaryFile(filePath, new byte[] { 1, 2, 3 });
+        Assert.True(result.Success, result.Message);
+        Assert.Equal(mtimeBefore, new FileInfo(filePath).LastWriteTimeUtc);
+    }
+
+    [Fact]
+    public void WriteBinaryFile_ChangedContent_Writes()
+    {
+        var filePath = Path.Combine(_tempDir, "changed.bin");
+        File.WriteAllBytes(filePath, new byte[] { 1, 2, 3 });
+
+        var result = VCLib.WriteBinaryFile(filePath, new byte[] { 4, 5, 6 });
+        Assert.True(result.Success, result.Message);
+        Assert.Equal(new byte[] { 4, 5, 6 }, File.ReadAllBytes(filePath));
+    }
+
+    [Fact]
+    public void WriteBinaryFile_ForceWrite_AlwaysWritesEvenWhenUnchanged()
+    {
+        var filePath = Path.Combine(_tempDir, "force.bin");
+        File.WriteAllBytes(filePath, new byte[] { 1, 2, 3 });
+        var mtimeBefore = new FileInfo(filePath).LastWriteTimeUtc;
+
+        Thread.Sleep(10);
+        var result = VCLib.WriteBinaryFile(filePath, new byte[] { 1, 2, 3 }, forceWrite: true);
+        Assert.True(result.Success, result.Message);
+        Assert.NotEqual(mtimeBefore, new FileInfo(filePath).LastWriteTimeUtc);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GitProvider tests (uses a temporary git repository)
 // ---------------------------------------------------------------------------
 

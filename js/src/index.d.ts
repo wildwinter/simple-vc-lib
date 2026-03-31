@@ -104,14 +104,18 @@ export declare function renameFolder(oldPath: string, newPath: string): VCResult
 /**
  * Write text to a file, handling VC checkout and registration automatically.
  * Calls prepareToWrite, writes the file, then calls finishedWrite.
+ * If the file already exists and its content matches, no VCS operations are
+ * performed and the file is not written. Set forceWrite to true to always write.
  */
-export declare function writeTextFile(filePath: string, content: string, encoding?: BufferEncoding): VCResult;
+export declare function writeTextFile(filePath: string, content: string, encoding?: BufferEncoding, forceWrite?: boolean): VCResult;
 
 /**
  * Write binary data to a file, handling VC checkout and registration automatically.
  * Calls prepareToWrite, writes the file, then calls finishedWrite.
+ * If the file already exists and its content matches, no VCS operations are
+ * performed and the file is not written. Set forceWrite to true to always write.
  */
-export declare function writeBinaryFile(filePath: string, data: Buffer | Uint8Array): VCResult;
+export declare function writeBinaryFile(filePath: string, data: Buffer | Uint8Array, forceWrite?: boolean): VCResult;
 
 /**
  * Override the provider used for all operations.

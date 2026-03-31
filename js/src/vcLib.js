@@ -1,5 +1,5 @@
 import { resolve, dirname } from 'path';
-import { statSync, writeFileSync } from 'fs';
+import { statSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { loadConfig } from './config.js';
 import { detectProvider, clearDetectorCache } from './detector.js';
 import { GitProvider } from './providers/gitProvider.js';
@@ -127,13 +127,26 @@ export function renameFolder(oldPath, newPath) {
  * Calls `prepareToWrite`, writes the file, then calls `finishedWrite`.
  * Works whether or not the file already exists.
  *
+ * If the file already exists and its content matches `content`, no VCS operations
+ * are performed and the file is not written. Set `forceWrite` to `true` to skip
+ * this check and always write.
+ *
  * On failure, returns the result from whichever step failed.
  *
  * @param {string} filePath
  * @param {string} content
  * @param {BufferEncoding} [encoding='utf8']
+ * @param {boolean} [forceWrite=false]
  */
-export function writeTextFile(filePath, content, encoding = 'utf8') {
+export function writeTextFile(filePath, content, encoding = 'utf8', forceWrite = false) {
+  if (!forceWrite && existsSync(filePath)) {
+    try {
+      const existing = readFileSync(filePath, { encoding });
+      if (existing === content) return { success: true, status: 'ok', message: '' };
+    } catch {
+      // If the file can't be read, fall through to the normal write path.
+    }
+  }
   const prep = resolveProvider(filePath).prepareToWrite(filePath);
   if (!prep.success) return prep;
   try {
@@ -149,12 +162,26 @@ export function writeTextFile(filePath, content, encoding = 'utf8') {
  * Calls `prepareToWrite`, writes the file, then calls `finishedWrite`.
  * Works whether or not the file already exists.
  *
+ * If the file already exists and its content matches `data`, no VCS operations
+ * are performed and the file is not written. Set `forceWrite` to `true` to skip
+ * this check and always write.
+ *
  * On failure, returns the result from whichever step failed.
  *
  * @param {string} filePath
  * @param {Buffer | Uint8Array} data
+ * @param {boolean} [forceWrite=false]
  */
-export function writeBinaryFile(filePath, data) {
+export function writeBinaryFile(filePath, data, forceWrite = false) {
+  if (!forceWrite && existsSync(filePath)) {
+    try {
+      const existing = readFileSync(filePath);
+      const incoming = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      if (existing.equals(incoming)) return { success: true, status: 'ok', message: '' };
+    } catch {
+      // If the file can't be read, fall through to the normal write path.
+    }
+  }
   const prep = resolveProvider(filePath).prepareToWrite(filePath);
   if (!prep.success) return prep;
   try {
