@@ -44,6 +44,9 @@ public class PerforceProvider : IVCProvider
 
         var result = P4(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File opened for add in Perforce");
+        // File is ignored (e.g. matches a .p4ignore pattern) — treat as outside the depot.
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        if (combined.Contains("ignored")) return _fs.FinishedWrite(filePath);
         return VCResult.Error($"Cannot add '{filePath}' to Perforce: {result.Error ?? result.Output}");
     }
 

@@ -343,6 +343,21 @@ describe('GitProvider', function () {
     assert.isTrue(result.success);
   });
 
+  it('finishedWrite on a gitignored file returns ok without error', () => {
+    // Write a .gitignore that ignores a build/ folder, then write a file inside it.
+    writeFileSync(join(repoDir, '.gitignore'), 'build/\n');
+    spawnSync('git', ['add', '.gitignore'], { cwd: repoDir });
+
+    const buildDir = join(repoDir, 'build');
+    mkdirSync(buildDir, { recursive: true });
+    const filePath = join(buildDir, 'output.txt');
+    writeFileSync(filePath, 'generated');
+
+    const result = finishedWrite(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.equal(result.status, 'ok');
+  });
+
   it('finishedWrite on a file outside the repo returns ok without git add', () => {
     const outsideDir = makeTempDir();
     const filePath = join(outsideDir, 'outside.txt');

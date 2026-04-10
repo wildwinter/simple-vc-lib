@@ -30,6 +30,9 @@ public class GitProvider : IVCProvider
 
         var result = Git(["add", filePath], cwd);
         if (result.ExitCode == 0) return VCResult.Ok("File added to git");
+        // File is ignored by .gitignore — treat as outside the repo.
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        if (combined.Contains("ignored")) return _fs.FinishedWrite(filePath);
         return VCResult.Error($"Cannot add '{filePath}' to git: {result.Error ?? result.Output}");
     }
 

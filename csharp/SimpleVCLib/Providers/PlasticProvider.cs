@@ -45,6 +45,9 @@ public class PlasticProvider : IVCProvider
 
         var result = Cm(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File added to Plastic SCM");
+        // File is ignored — treat as outside the workspace.
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        if (combined.Contains("ignored")) return _fs.FinishedWrite(filePath);
         return VCResult.Error($"Cannot add '{filePath}' to Plastic SCM: {result.Error ?? result.Output}");
     }
 

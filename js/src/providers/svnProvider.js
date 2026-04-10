@@ -65,6 +65,9 @@ export class SvnProvider {
 
     const result = svn(['add', filePath]);
     if (result.exitCode === 0) return okResult('File added to SVN');
+    // File is ignored — treat as outside the working copy.
+    const combined = (result.output + ' ' + result.error).toLowerCase();
+    if (combined.includes('ignored')) return fs.finishedWrite(filePath);
     return errorResult('error', `Cannot add '${filePath}' to SVN: ${result.error || result.output}`);
   }
 

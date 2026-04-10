@@ -48,6 +48,9 @@ public class SvnProvider : IVCProvider
 
         var result = Svn(["add", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File added to SVN");
+        // File is ignored — treat as outside the working copy.
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        if (combined.Contains("ignored")) return _fs.FinishedWrite(filePath);
         return VCResult.Error($"Cannot add '{filePath}' to SVN: {result.Error ?? result.Output}");
     }
 

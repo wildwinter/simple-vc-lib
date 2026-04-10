@@ -77,6 +77,9 @@ export class GitProvider {
 
     const result = git(['add', filePath], cwd);
     if (result.exitCode === 0) return okResult('File added to git');
+    // File is ignored by .gitignore — treat as outside the repo.
+    const combined = (result.output + ' ' + result.error).toLowerCase();
+    if (combined.includes('ignored')) return fs.finishedWrite(filePath);
     return errorResult('error', `Cannot add '${filePath}' to git: ${result.error || result.output}`);
   }
 

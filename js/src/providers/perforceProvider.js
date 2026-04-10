@@ -86,6 +86,9 @@ export class PerforceProvider {
 
     const result = p4(['add', filePath]);
     if (result.exitCode === 0) return okResult('File opened for add in Perforce');
+    // File is ignored (e.g. matches a .p4ignore pattern) — treat as outside the depot.
+    const combined = (result.output + ' ' + result.error).toLowerCase();
+    if (combined.includes('ignored')) return fs.finishedWrite(filePath);
     return errorResult('error', `Cannot add '${filePath}' to Perforce: ${result.error || result.output}`);
   }
 

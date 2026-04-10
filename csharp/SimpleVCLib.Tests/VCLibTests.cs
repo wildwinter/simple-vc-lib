@@ -450,6 +450,31 @@ public class GitProviderTests : IDisposable
     }
 
     [Fact]
+    public void FinishedWrite_GitIgnoredFile_ReturnsOkWithoutError()
+    {
+        // Write a .gitignore that ignores a build/ folder, then write a file inside it.
+        File.WriteAllText(Path.Combine(_repoDir, ".gitignore"), "build/\n");
+        static void Git(string args, string cwd)
+        {
+            var psi = new ProcessStartInfo("git", args)
+                { WorkingDirectory = cwd, UseShellExecute = false,
+                  RedirectStandardOutput = true, RedirectStandardError = true };
+            using var p = Process.Start(psi)!;
+            p.WaitForExit();
+        }
+        Git("add .gitignore", _repoDir);
+
+        var buildDir = Path.Combine(_repoDir, "build");
+        Directory.CreateDirectory(buildDir);
+        var filePath = Path.Combine(buildDir, "output.txt");
+        File.WriteAllText(filePath, "generated");
+
+        var result = VCLib.FinishedWrite(filePath);
+        Assert.True(result.Success, result.Message);
+        Assert.Equal(VCStatus.Ok, result.Status);
+    }
+
+    [Fact]
     public void FinishedWrite_FileOutsideRepo_ReturnsOkWithoutGitAdd()
     {
         var outsideDir = TestHelpers.MakeTempDir();

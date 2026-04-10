@@ -64,6 +64,9 @@ export class PlasticProvider {
 
     const result = cm(['add', filePath]);
     if (result.exitCode === 0) return okResult('File added to Plastic SCM');
+    // File is ignored — treat as outside the workspace.
+    const combined = (result.output + ' ' + result.error).toLowerCase();
+    if (combined.includes('ignored')) return fs.finishedWrite(filePath);
     return errorResult('error', `Cannot add '${filePath}' to Plastic SCM: ${result.error || result.output}`);
   }
 
