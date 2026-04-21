@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>wildwinter.SimpleVCLib</PackageId>
-    <Version>0.0.8</Version>
+    <Version>0.0.9</Version>
     <Authors>Ian Thomas</Authors>
     <Company>Storyworlds</Company>
     <Description>An agnostic version control wrapper library for game development tools.</Description>
