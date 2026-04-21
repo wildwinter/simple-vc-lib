@@ -1,6 +1,6 @@
 {
   "name": "simple-vc-lib",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "An agnostic version control wrapper library for game development tools.",
   "scripts": {
     "clean": "npm run clean:js && npm run clean:cs",
