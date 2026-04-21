@@ -133,6 +133,7 @@ public class PerforceProvider : IVCProvider
             try
             {
                 CopyDirectory(oldPath, newPath);
+                ClearReadOnly(oldPath);
                 Directory.Delete(oldPath, recursive: true);
             }
             catch (Exception ex)
@@ -175,6 +176,12 @@ public class PerforceProvider : IVCProvider
 
     private static CommandRunner.Result P4(string[] args) =>
         CommandRunner.Run("p4", args);
+
+    private static void ClearReadOnly(string dirPath)
+    {
+        foreach (var file in Directory.EnumerateFiles(dirPath, "*", SearchOption.AllDirectories))
+            File.SetAttributes(file, FileAttributes.Normal);
+    }
 
     private static void CopyDirectory(string src, string dst)
     {

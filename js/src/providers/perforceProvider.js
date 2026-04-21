@@ -1,9 +1,18 @@
-import { existsSync, unlinkSync, chmodSync, rmSync, cpSync, mkdirSync } from 'fs';
+import { existsSync, unlinkSync, chmodSync, rmSync, cpSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { FilesystemProvider } from './filesystemProvider.js';
 
 const fs = new FilesystemProvider();
+
+// Perforce marks synced files read-only; strip that before any recursive delete.
+function clearReadOnly(dirPath) {
+  for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+    const full = dirPath + '/' + entry.name;
+    if (entry.isDirectory()) clearReadOnly(full);
+    else chmodSync(full, 0o666);
+  }
+}
 
 function p4(args) {
   return runCommand('p4', args);
@@ -154,6 +163,7 @@ export class PerforceProvider {
       try {
         mkdirSync(newPath, { recursive: true });
         cpSync(oldPath, newPath, { recursive: true });
+        clearReadOnly(oldPath);
         rmSync(oldPath, { recursive: true, force: true });
       } catch (e) {
         return errorResult('error', `Cannot rename folder '${oldPath}': ${e.message}`);

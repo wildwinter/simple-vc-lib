@@ -71,7 +71,11 @@ public class PerforceProviderTests : IDisposable
             P4("submit -d \"cleanup: remove simple-vc-lib test dir\"");
         // Remove the local directory regardless.
         if (Directory.Exists(_testDir))
+        {
+            foreach (var f in Directory.EnumerateFiles(_testDir, "*", SearchOption.AllDirectories))
+                File.SetAttributes(f, FileAttributes.Normal);
             Directory.Delete(_testDir, recursive: true);
+        }
     }
 
     // -------------------------------------------------------------------------
