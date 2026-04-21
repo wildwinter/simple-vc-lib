@@ -221,6 +221,37 @@ public class PerforceProviderTests : IDisposable
     }
 
     [Fact]
+    public void FinishedWrite_PendingDeleteFile_ReopensForEdit()
+    {
+        if (!_available) return;
+
+        // Simulate the TTS scenario: a file is submitted, then marked for delete
+        // (e.g. by a cleanup pass), then regenerated on disk and FinishedWrite is called.
+        var filePath = Path.Combine(_testDir, "fw-pending-delete.txt");
+        SubmitFile(filePath, "original content");
+
+        // Mark for delete — this removes the local file and opens a pending delete.
+        P4($"delete \"{filePath}\"");
+        Assert.False(File.Exists(filePath));
+
+        // Re-create the file on disk (as WriteBinaryFile with forceWrite:true would do).
+        File.WriteAllText(filePath, "regenerated content");
+
+        // FinishedWrite must cancel the pending delete and reopen for edit.
+        var result = VCLib.FinishedWrite(filePath);
+        Assert.True(result.Success, result.Message);
+
+        // File must be present on disk with the new content.
+        Assert.True(File.Exists(filePath));
+        Assert.Equal("regenerated content", File.ReadAllText(filePath));
+
+        // P4 state must be "edit", not "delete".
+        var fstat = P4Checked($"fstat \"{filePath}\"");
+        Assert.Contains("action edit", fstat.Output);
+        Assert.DoesNotContain("action delete", fstat.Output);
+    }
+
+    [Fact]
     public void DeleteFolder_SubmittedFolder_RemovesFromDepot()
     {
         if (!_available) return;
