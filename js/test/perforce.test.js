@@ -161,6 +161,31 @@ describe('PerforceProvider', function () {
     assert.equal(readFileSync(filePath, 'utf8'), 'updated content');
   });
 
+  it('finishedWrite cancels a pending delete and reopens for edit', function () {
+    const filePath = join(testDir, 'fw-pending-delete.txt');
+    submitFile(filePath, 'original content');
+
+    // Mark for delete — removes the local file and opens a pending delete.
+    p4(['delete', filePath]);
+    assert.isFalse(existsSync(filePath));
+
+    // Re-create the file on disk (as writeBinaryFile with forceWrite would do).
+    writeFileSync(filePath, 'regenerated content');
+
+    // finishedWrite must cancel the pending delete and reopen for edit.
+    const result = finishedWrite(filePath);
+    assert.isTrue(result.success, result.message);
+
+    // File must be present on disk with the new content.
+    assert.isTrue(existsSync(filePath));
+    assert.equal(readFileSync(filePath, 'utf8'), 'regenerated content');
+
+    // P4 state must be "edit", not "delete".
+    const fstat = p4(['fstat', filePath]);
+    assert.include(fstat.stdout, 'action edit', 'fstat should report open for edit, not delete');
+    assert.notInclude(fstat.stdout, 'action delete');
+  });
+
   it('deleteFile removes a submitted file from depot', function () {
     const filePath = join(testDir, 'del-test.txt');
     submitFile(filePath);

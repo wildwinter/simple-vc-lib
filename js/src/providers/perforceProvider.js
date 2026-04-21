@@ -82,6 +82,15 @@ export class PerforceProvider {
     if (info === null)
       return fs.finishedWrite(filePath);
 
+    // File has a pending delete in a changelist but was just re-written to disk.
+    // Cancel the delete (keeping the new local content) then reopen for edit.
+    if (info.includes('... action delete')) {
+      p4(['revert', '-k', filePath]);
+      const editResult = p4(['edit', filePath]);
+      if (editResult.exitCode === 0) return okResult('File reopened for edit after pending delete was reverted');
+      return errorResult('error', `Cannot reopen '${filePath}' for edit after reverting pending delete: ${editResult.error || editResult.output}`);
+    }
+
     if (isInDepotFstat(info)) return okResult();
 
     const result = p4(['add', filePath]);
