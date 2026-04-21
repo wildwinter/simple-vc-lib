@@ -40,6 +40,16 @@ public class PerforceProvider : IVCProvider
         if (fstat is null)
             return _fs.FinishedWrite(filePath);
 
+        // File has a pending delete in a changelist but was just re-written to disk.
+        // Cancel the delete (keeping the new local content) then reopen for edit.
+        if (fstat.Contains("... action delete"))
+        {
+            P4(["revert", "-k", filePath]);
+            var editResult = P4(["edit", filePath]);
+            if (editResult.ExitCode == 0) return VCResult.Ok("File reopened for edit after pending delete was reverted");
+            return VCResult.Error($"Cannot reopen '{filePath}' for edit after reverting pending delete: {editResult.Error ?? editResult.Output}");
+        }
+
         if (IsInDepotFstat(fstat)) return VCResult.Ok();
 
         var result = P4(["add", filePath]);
