@@ -1,7 +1,8 @@
 import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, renameSync, constants } from 'fs';
-import { dirname } from 'path';
+import { dirname, resolve, basename } from 'path';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
+import { writableBit } from '../vcStatus.js';
 import { FilesystemProvider } from './filesystemProvider.js';
 
 const fs = new FilesystemProvider();
@@ -149,5 +150,100 @@ export class GitProvider {
     }
 
     return okResult();
+  }
+
+  /**
+   * Status for a batch of files: per repository root, ONE
+   * `git status --porcelain -z` (tracked-ness) plus - when git-lfs is in play -
+   * ONE `git lfs locks --verify --json` (`--verify` splits ours vs theirs).
+   * git itself has no locks; lock-based git workflows are git-lfs locks.
+   *
+   * All matching is done on REPO-RELATIVE paths (via `rev-parse --show-prefix`),
+   * never by joining absolute paths - so symlinked ancestors (macOS `/var` ->
+   * `/private/var`, `/tmp` -> `/private/tmp`) cannot break the lookup.
+   *
+   * @param {string[]} filePaths
+   * @returns {import('../vcStatus.js').VCFileStatus[]}
+   */
+  status(filePaths) {
+    // Group by repository root so one repo costs two spawns, not 2-per-file.
+    // Per directory, one `rev-parse --show-toplevel --show-prefix` yields both
+    // the canonical root and the dir's repo-relative prefix.
+    const infoByDir = new Map();
+    const groups = new Map();
+    for (const filePath of filePaths) {
+      const abs = resolve(filePath);
+      const dir = dirname(abs);
+      let info = infoByDir.get(dir);
+      if (info === undefined) {
+        const result = git(['rev-parse', '--show-toplevel', '--show-prefix'], dir);
+        if (result.exitCode === 0) {
+          const lines = result.output.split('\n');
+          info = { root: lines[0].trim(), prefix: (lines[1] ?? '').trim() };
+        } else {
+          info = { root: null, prefix: '' };
+        }
+        infoByDir.set(dir, info);
+      }
+      const key = info.root ?? '(none)';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ filePath, abs, relKey: info.prefix + basename(abs) });
+    }
+
+    const byInput = new Map();
+    for (const [key, files] of groups) {
+      if (key === '(none)') {
+        // Not inside a repository - report writability only.
+        for (const { filePath, abs } of files) {
+          byInput.set(filePath, { filePath: abs, system: 'git', writable: writableBit(abs) });
+        }
+        continue;
+      }
+      const root = key;
+
+      // -z output: `XY <path>\0` entries, paths relative to the repo root.
+      const st = git(['status', '--porcelain', '-z', '--', ...files.map((f) => f.relKey)], root);
+      const states = new Map();
+      if (st.exitCode === 0 && st.output) {
+        for (const entry of st.output.split('\0')) {
+          if (entry.length < 4) continue;
+          states.set(entry.slice(3), entry.slice(0, 2));
+        }
+      }
+
+      // LFS locks (optional - skipped silently when lfs is absent or errors).
+      // Lock paths are repo-relative already.
+      const ours = new Set();
+      const theirs = new Map();
+      const locks = git(['lfs', 'locks', '--verify', '--json'], root);
+      if (locks.exitCode === 0 && locks.output.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(locks.output);
+          for (const lock of parsed.ours ?? []) ours.add(lock.path);
+          for (const lock of parsed.theirs ?? []) {
+            theirs.set(lock.path, [...(theirs.get(lock.path) ?? []), lock.owner?.name ?? 'unknown']);
+          }
+        } catch {
+          // Unparseable lock output - status is still useful without it.
+        }
+      }
+
+      for (const { filePath, abs, relKey } of files) {
+        /** @type {import('../vcStatus.js').VCFileStatus} */
+        const status = {
+          filePath: abs,
+          system: 'git',
+          writable: writableBit(abs),
+          // Absent from porcelain output = clean & tracked; '??' = untracked.
+          tracked: states.get(relKey) !== '??',
+        };
+        if (ours.has(relKey)) status.openedByMe = true;
+        const owners = theirs.get(relKey);
+        if (owners) status.lockedBy = owners;
+        byInput.set(filePath, status);
+      }
+    }
+
+    return filePaths.map((filePath) => byInput.get(filePath));
   }
 }

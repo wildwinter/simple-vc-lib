@@ -6,6 +6,34 @@ export interface VCResult {
   message: string;
 }
 
+
+export type VCSystem = 'git' | 'perforce' | 'plastic' | 'svn' | 'filesystem';
+
+/** Per-file status, as returned by fileStatus / a provider's status. */
+export interface VCFileStatus {
+  /** Absolute path of the file. */
+  filePath: string;
+  system: VCSystem;
+  /** Writable on disk right now (the read-only bit - lock workflows key off this). */
+  writable: boolean;
+  /** Known to the VCS (tracked / in the depot). Undefined when the provider cannot say. */
+  tracked?: boolean;
+  /** Opened / checked out / locked by the current user. */
+  openedByMe?: boolean;
+  /** Who else has it open or locked (e.g. "bob@bob-ws"). */
+  lockedBy?: string[];
+  /** A newer revision exists on the server. */
+  outOfDate?: boolean;
+}
+
+/** The outcome of one file in a writeTextFiles batch. */
+export interface VCWriteOutcome {
+  filePath: string;
+  success: boolean;
+  status: VCStatus;
+  message: string;
+}
+
 export interface IVCProvider {
   readonly name: string;
   prepareToWrite(filePath: string): VCResult;
@@ -14,6 +42,8 @@ export interface IVCProvider {
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  /** Batched per-file status (one spawn per provider / repository, not per file). */
+  status(filePaths: string[]): VCFileStatus[];
 }
 
 export declare class GitProvider implements IVCProvider {
@@ -24,6 +54,8 @@ export declare class GitProvider implements IVCProvider {
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  /** Batched per-file status (one spawn per provider / repository, not per file). */
+  status(filePaths: string[]): VCFileStatus[];
 }
 
 export declare class PerforceProvider implements IVCProvider {
@@ -34,6 +66,8 @@ export declare class PerforceProvider implements IVCProvider {
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  /** Batched per-file status (one spawn per provider / repository, not per file). */
+  status(filePaths: string[]): VCFileStatus[];
 }
 
 export declare class PlasticProvider implements IVCProvider {
@@ -44,6 +78,8 @@ export declare class PlasticProvider implements IVCProvider {
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  /** Batched per-file status (one spawn per provider / repository, not per file). */
+  status(filePaths: string[]): VCFileStatus[];
 }
 
 export declare class SvnProvider implements IVCProvider {
@@ -54,6 +90,8 @@ export declare class SvnProvider implements IVCProvider {
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  /** Batched per-file status (one spawn per provider / repository, not per file). */
+  status(filePaths: string[]): VCFileStatus[];
 }
 
 export declare class FilesystemProvider implements IVCProvider {
@@ -64,6 +102,8 @@ export declare class FilesystemProvider implements IVCProvider {
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  /** Batched per-file status (one spawn per provider / repository, not per file). */
+  status(filePaths: string[]): VCFileStatus[];
 }
 
 /**
@@ -116,6 +156,30 @@ export declare function writeTextFile(filePath: string, content: string, encodin
  * performed and the file is not written. Set forceWrite to true to always write.
  */
 export declare function writeBinaryFile(filePath: string, data: Buffer | Uint8Array, forceWrite?: boolean): VCResult;
+
+/**
+ * Write a batch of text files through VC, creating parent directories.
+ * Every outcome is reported (a refusal carries its why); one refusal does not
+ * stop the rest. Each write goes through writeTextFile.
+ */
+export declare function writeTextFiles(files: { filePath: string; content: string }[], encoding?: BufferEncoding): { success: boolean; results: VCWriteOutcome[] };
+
+/**
+ * Status for a batch of files: tracked / writable / locked-by / opened-by-me /
+ * out-of-date. Paths are grouped by provider so a whole project costs a spawn
+ * or two, not one per file.
+ */
+export declare function fileStatus(filePaths: string[]): VCFileStatus[];
+
+/**
+ * Override the command runner used for all VC operations - lets tests inject
+ * canned CLI output (e.g. p4 -ztag fstat transcripts) so provider logic is
+ * unit-testable without the VCS installed. Pass null to clear.
+ */
+export declare function setCommandRunner(runner: ((command: string, args: string[], options?: object) => { exitCode: number; output: string; error: string; timedOut?: boolean }) | null): void;
+
+/** Clear any previously set command-runner override. */
+export declare function clearCommandRunner(): void;
 
 /**
  * Override the provider used for all operations.

@@ -30,6 +30,19 @@ public static class VCLib
     }
 
     /// <summary>
+    /// Override the command runner used for all VC operations - lets tests inject
+    /// canned CLI output (e.g. <c>p4 -ztag fstat</c> transcripts) so provider logic
+    /// is unit-testable without the VCS installed. The same pattern as
+    /// <see cref="SetProvider"/>. Pass null to restore real execution.
+    /// </summary>
+    public static void SetCommandRunner(Func<string, string[], CommandResult>? runner) =>
+        CommandRunner.SetOverride(runner);
+
+    /// <summary>Clear any command-runner override, restoring real execution.</summary>
+    public static void ClearCommandRunner() =>
+        CommandRunner.SetOverride(null);
+
+    /// <summary>
     /// Return the provider that would be used for <paramref name="path"/>.
     /// </summary>
     public static IVCProvider GetProvider(string path) =>
@@ -141,5 +154,61 @@ public static class VCLib
             return VCResult.Error(e.Message);
         }
         return GetProvider(filePath).FinishedWrite(filePath);
+    }
+    /// <summary>
+    /// Write a batch of text files through VC, creating parent directories, and
+    /// report EVERY outcome - a refused write comes back with its why ("locked by
+    /// bob@bob-ws"), never a bare access exception, and one refusal does not stop
+    /// the rest. Each write goes through <see cref="WriteTextFile"/> (prepare ->
+    /// write -> finished, with the unchanged-content short-circuit).
+    /// </summary>
+    public static VCWriteBatchResult WriteTextFiles(IReadOnlyList<VCFileWrite> files, Encoding? encoding = null)
+    {
+        var results = new List<VCWriteOutcome>();
+        foreach (var file in files)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(file.FilePath));
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            }
+            catch (Exception e)
+            {
+                results.Add(new VCWriteOutcome(file.FilePath, false, VCStatus.Error, e.Message));
+                continue;
+            }
+            var result = WriteTextFile(file.FilePath, file.Content, encoding);
+            results.Add(new VCWriteOutcome(file.FilePath, result.Success, result.Status, result.Message));
+        }
+        return new VCWriteBatchResult(results.All(r => r.Success), results);
+    }
+
+    /// <summary>
+    /// Status for a batch of files: tracked / writable / locked-by / opened-by-me /
+    /// out-of-date, per file, in input order. Paths are grouped by provider so a
+    /// whole project costs a spawn or two, not one per file (Perforce: ONE
+    /// <c>p4 -ztag fstat</c>; git: one <c>git status</c> + one
+    /// <c>git lfs locks</c> per repository). The writable bit is always reported -
+    /// in lock-based workflows it is the cheap local signal for "is this editable
+    /// right now?".
+    /// </summary>
+    public static IReadOnlyList<VCFileStatus> FileStatus(IReadOnlyList<string> filePaths)
+    {
+        var groups = new Dictionary<string, (IVCProvider Provider, List<string> Paths)>();
+        foreach (var filePath in filePaths)
+        {
+            var provider = GetProvider(filePath);
+            if (!groups.TryGetValue(provider.Name, out var group))
+                groups[provider.Name] = group = (provider, new List<string>());
+            group.Paths.Add(filePath);
+        }
+
+        var byInput = new Dictionary<string, VCFileStatus>();
+        foreach (var (provider, paths) in groups.Values)
+        {
+            var statuses = provider.Status(paths);
+            for (var i = 0; i < paths.Count; i++) byInput[paths[i]] = statuses[i];
+        }
+        return filePaths.Select(p => byInput[p]).ToList();
     }
 }

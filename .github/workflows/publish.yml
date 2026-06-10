@@ -1,0 +1,52 @@
+name: Publish
+
+# Publishes @wildwinter/simple-vc-lib (the js package) to GitHub Packages when
+# a GitHub Release is published - the same pattern as the expr repo. Bump
+# js/package.json's version before tagging; the publish is guarded so a rerun
+# (or a release that doesn't bump) skips instead of failing on a republish.
+#
+# npmjs publishing happens via the local `npm run publish-npm` (js/scripts/
+# publish.mjs), which targets BOTH registries with the same guard - so either
+# path converges both registries on the current version. (To move npmjs into
+# CI too, add an NPM_TOKEN secret and a second guarded publish step against
+# registry.npmjs.org.)
+#
+# The Perforce test suite self-skips when no p4 workspace is available.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: js/package-lock.json
+          # Inject GitHub Packages auth from NODE_AUTH_TOKEN at runtime, so no
+          # committed .npmrc carries a token line.
+          registry-url: https://npm.pkg.github.com
+          scope: '@wildwinter'
+      - run: npm ci
+      - run: npm test
+      - name: Publish @wildwinter/simple-vc-lib to GitHub Packages
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          if npm view "@wildwinter/simple-vc-lib@$VER" version >/dev/null 2>&1; then
+            echo "@wildwinter/simple-vc-lib@$VER already on GitHub Packages; skipping."
+          else
+            node scripts/publish.mjs https://npm.pkg.github.com
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

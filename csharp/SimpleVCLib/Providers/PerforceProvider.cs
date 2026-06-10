@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace SimpleVCLib;
 
 /// <summary>
@@ -190,5 +192,108 @@ public class PerforceProvider : IVCProvider
             File.Copy(file, Path.Combine(dst, Path.GetFileName(file)), overwrite: true);
         foreach (var dir in Directory.EnumerateDirectories(src))
             CopyDirectory(dir, Path.Combine(dst, Path.GetFileName(dir)));
+    }
+    /// <summary>
+    /// Status for a batch of files in ONE <c>p4 -ztag fstat</c> spawn.
+    /// <para>
+    /// Tracked-ness follows the same rules as the write path: workspace-mapped is
+    /// not depot-tracked; deleted-at-head is untracked unless currently reopened.
+    /// Lock / checkout info comes from otherOpen / otherLock / ourLock / action;
+    /// staleness from haveRev &lt; headRev.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths)
+    {
+        var result = P4(["-ztag", "fstat", .. filePaths]);
+        var records = result.Output.Length > 0 ? ParseZtag(result.Output) : new List<ZtagRecord>();
+
+        var byClientFile = new Dictionary<string, ZtagRecord>();
+        foreach (var record in records)
+        {
+            if (record.Fields.TryGetValue("clientFile", out var clientFile))
+                byClientFile[Path.GetFullPath(clientFile)] = record;
+        }
+
+        var statuses = new List<VCFileStatus>();
+        foreach (var filePath in filePaths)
+        {
+            var abs = Path.GetFullPath(filePath);
+            var writable = FileStatusHelpers.WritableBit(abs);
+            if (!byClientFile.TryGetValue(abs, out var record))
+            {
+                // fstat returned nothing for it: outside the client view / unknown to p4.
+                statuses.Add(new VCFileStatus(abs, "perforce", writable, Tracked: false));
+                continue;
+            }
+
+            var headAction = record.Fields.GetValueOrDefault("headAction", "");
+            var deletedAtHead = headAction is "delete" or "move/delete";
+            var openedByMe = record.Fields.ContainsKey("action");
+            var tracked = (record.Fields.ContainsKey("headRev") || record.Fields.ContainsKey("depotFile"))
+                          && (!deletedAtHead || openedByMe);
+
+            var otherOpen = record.Multi.GetValueOrDefault("otherOpen", new List<string>());
+            var otherLock = record.Multi.GetValueOrDefault("otherLock", new List<string>());
+            // otherLockN names the locker when present; otherwise an exclusive (+l)
+            // filetype means any other opener effectively holds it.
+            var holders = otherLock.Count > 0 ? otherLock
+                        : record.Fields.ContainsKey("otherLock") ? otherOpen : new List<string>();
+            var lockedBy = holders.Count > 0 ? holders : otherOpen;
+
+            _ = int.TryParse(record.Fields.GetValueOrDefault("haveRev", "0"), out var haveRev);
+            _ = int.TryParse(record.Fields.GetValueOrDefault("headRev", "0"), out var headRev);
+
+            statuses.Add(new VCFileStatus(
+                abs, "perforce", writable,
+                Tracked: tracked,
+                OpenedByMe: openedByMe || record.Fields.ContainsKey("ourLock") ? true : null,
+                LockedBy: lockedBy.Count > 0 ? lockedBy : null,
+                OutOfDate: headRev > haveRev && !deletedAtHead ? true : null));
+        }
+        return statuses;
+    }
+
+    internal sealed record ZtagRecord(Dictionary<string, string> Fields, Dictionary<string, List<string>> Multi);
+
+    private static readonly Regex IndexedField = new(@"^([A-Za-z/]+?)(\d+)$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Parse <c>p4 -ztag</c> output: <c>... field value</c> lines; a blank line
+    /// separates records. Indexed fields (otherOpen0..N) collect by prefix.
+    /// </summary>
+    internal static List<ZtagRecord> ParseZtag(string output)
+    {
+        var records = new List<ZtagRecord>();
+        ZtagRecord? current = null;
+        foreach (var line in output.Split('\n'))
+        {
+            if (!line.StartsWith("... ", StringComparison.Ordinal))
+            {
+                if (line.Trim().Length == 0) current = null; // record separator
+                continue;
+            }
+            if (current is null)
+            {
+                current = new ZtagRecord(new Dictionary<string, string>(), new Dictionary<string, List<string>>());
+                records.Add(current);
+            }
+            var body = line[4..];
+            var space = body.IndexOf(' ');
+            var field = space == -1 ? body : body[..space];
+            var value = space == -1 ? "" : body[(space + 1)..];
+            var indexed = IndexedField.Match(field);
+            if (indexed.Success)
+            {
+                var prefix = indexed.Groups[1].Value;
+                if (!current.Multi.TryGetValue(prefix, out var list))
+                    current.Multi[prefix] = list = new List<string>();
+                list.Add(value);
+            }
+            else
+            {
+                current.Fields[field] = value;
+            }
+        }
+        return records;
     }
 }

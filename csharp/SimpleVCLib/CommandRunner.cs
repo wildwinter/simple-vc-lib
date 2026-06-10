@@ -2,9 +2,25 @@ using System.Diagnostics;
 
 namespace SimpleVCLib;
 
+/// <summary>
+/// The result of one CLI invocation, as seen by a command-runner override
+/// (<see cref="VCLib.SetCommandRunner"/>).
+/// </summary>
+public sealed record CommandResult(int ExitCode, string Output, string Error);
+
 internal static class CommandRunner
 {
     internal record Result(int ExitCode, string Output, string Error);
+
+    private static Func<string, string[], CommandResult>? _override;
+
+    /// <summary>
+    /// Override the runner for all VC operations - lets tests inject canned CLI
+    /// output (e.g. <c>p4 -ztag fstat</c> transcripts) so provider logic is
+    /// unit-testable without the VCS installed. Null restores real execution.
+    /// </summary>
+    internal static void SetOverride(Func<string, string[], CommandResult>? runner) =>
+        _override = runner;
 
     /// <summary>
     /// Run a CLI command synchronously, capturing stdout and stderr.
@@ -13,6 +29,12 @@ internal static class CommandRunner
     internal static Result Run(string command, string[] args, int timeoutMs = 10000,
                                string? workingDirectory = null)
     {
+        if (_override is not null)
+        {
+            var canned = _override(command, args);
+            return new Result(canned.ExitCode, canned.Output, canned.Error);
+        }
+
         var psi = new ProcessStartInfo
         {
             FileName = command,

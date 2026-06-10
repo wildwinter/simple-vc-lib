@@ -118,4 +118,10 @@ public class PlasticProvider : IVCProvider
 
     private static CommandRunner.Result Cm(string[] args) =>
         CommandRunner.Run("cm", args);
+    /// <summary>
+    /// Status for a batch of files. Full Plastic reads (cm status / lock list) are TODO; reports the writable bit.
+    /// </summary>
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths) =>
+        filePaths.Select(p => new VCFileStatus(
+            Path.GetFullPath(p), "plastic", FileStatusHelpers.WritableBit(p))).ToList();
 }

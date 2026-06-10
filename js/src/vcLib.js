@@ -1,5 +1,5 @@
 import { resolve, dirname } from 'path';
-import { statSync, writeFileSync, readFileSync, existsSync } from 'fs';
+import { statSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { loadConfig } from './config.js';
 import { detectProvider, clearDetectorCache } from './detector.js';
 import { GitProvider } from './providers/gitProvider.js';
@@ -190,4 +190,55 @@ export function writeBinaryFile(filePath, data, forceWrite = false) {
     return { success: false, status: 'error', message: e.message };
   }
   return resolveProvider(filePath).finishedWrite(filePath);
+}
+
+/**
+ * Write a batch of text files through VC, creating parent directories, and
+ * report EVERY outcome - a refused write comes back with its why ("locked by
+ * bob@bob-ws"), never a bare EACCES, and one refusal does not stop the rest.
+ * Each write goes through `writeTextFile` (prepare -> write -> finished, with
+ * the unchanged-content short-circuit).
+ *
+ * @param {{filePath: string, content: string}[]} files
+ * @param {BufferEncoding} [encoding='utf8']
+ * @returns {{success: boolean, results: Array<{filePath: string, success: boolean, status: import('./vcResult.js').VCStatus, message: string}>}}
+ */
+export function writeTextFiles(files, encoding = 'utf8') {
+  const results = files.map(({ filePath, content }) => {
+    try {
+      mkdirSync(dirname(resolve(filePath)), { recursive: true });
+    } catch (e) {
+      return { filePath, success: false, status: 'error', message: e.message };
+    }
+    const result = writeTextFile(filePath, content, encoding);
+    return { filePath, success: result.success, status: result.status, message: result.message };
+  });
+  return { success: results.every((r) => r.success), results };
+}
+
+/**
+ * Status for a batch of files: tracked / writable / locked-by / opened-by-me /
+ * out-of-date, per file. Paths are grouped by provider so a whole project
+ * costs a spawn or two, not one per file (Perforce: ONE `p4 -ztag fstat`; git:
+ * one `git status` + one `git lfs locks` per repository). The writable bit is
+ * always reported - in lock-based workflows it is the cheap local signal for
+ * "is this editable right now?".
+ *
+ * @param {string[]} filePaths
+ * @returns {import('./vcStatus.js').VCFileStatus[]}
+ */
+export function fileStatus(filePaths) {
+  const groups = new Map();
+  for (const filePath of filePaths) {
+    const provider = resolveProvider(filePath);
+    if (!groups.has(provider.name)) groups.set(provider.name, { provider, paths: [] });
+    groups.get(provider.name).paths.push(filePath);
+  }
+
+  const byInput = new Map();
+  for (const { provider, paths } of groups.values()) {
+    const statuses = provider.status(paths);
+    for (let i = 0; i < paths.length; i++) byInput.set(paths[i], statuses[i]);
+  }
+  return filePaths.map((filePath) => byInput.get(filePath));
 }

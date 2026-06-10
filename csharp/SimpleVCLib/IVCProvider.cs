@@ -47,4 +47,11 @@ public interface IVCProvider
     /// No-op if the source does not exist.
     /// </summary>
     VCResult RenameFolder(string oldPath, string newPath);
+
+    /// <summary>
+    /// Status for a batch of files: tracked / writable / locked-by / opened-by-me /
+    /// out-of-date, per file, in input order. Batched: one spawn per provider /
+    /// repository, not one per file.
+    /// </summary>
+    IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths);
 }

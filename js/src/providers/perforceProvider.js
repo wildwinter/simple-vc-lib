@@ -1,6 +1,8 @@
 import { existsSync, unlinkSync, chmodSync, rmSync, cpSync, mkdirSync, readdirSync, statSync } from 'fs';
+import { resolve } from 'path';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
+import { writableBit } from '../vcStatus.js';
 import { FilesystemProvider } from './filesystemProvider.js';
 
 const fs = new FilesystemProvider();
@@ -195,4 +197,93 @@ export class PerforceProvider {
 
     return okResult();
   }
+
+  /**
+   * Status for a batch of files in ONE `p4 -ztag fstat` spawn.
+   *
+   * Tracked-ness follows the same rules as the write path (`isInDepotFstat`):
+   * workspace-mapped is not depot-tracked; deleted-at-head is untracked unless
+   * currently reopened. Lock / checkout info comes from otherOpen / otherLock /
+   * ourLock / action; staleness from haveRev < headRev.
+   *
+   * @param {string[]} filePaths
+   * @returns {import('../vcStatus.js').VCFileStatus[]}
+   */
+  status(filePaths) {
+    const result = p4(['-ztag', 'fstat', ...filePaths]);
+    const records = result.output ? parseZtag(result.output) : [];
+
+    const byClientFile = new Map();
+    for (const record of records) {
+      const clientFile = record.fields.get('clientFile');
+      if (clientFile) byClientFile.set(resolve(clientFile), record);
+    }
+
+    return filePaths.map((filePath) => {
+      const abs = resolve(filePath);
+      /** @type {import('../vcStatus.js').VCFileStatus} */
+      const status = { filePath: abs, system: 'perforce', writable: writableBit(abs) };
+      const record = byClientFile.get(abs);
+      if (!record) {
+        // fstat returned nothing for it: outside the client view / unknown to p4.
+        status.tracked = false;
+        return status;
+      }
+
+      const has = (field) => record.fields.has(field);
+      const headAction = record.fields.get('headAction') ?? '';
+      const deletedAtHead = headAction === 'delete' || headAction === 'move/delete';
+      const openedByMe = has('action');
+      status.tracked = (has('headRev') || has('depotFile')) && (!deletedAtHead || openedByMe);
+      if (openedByMe || has('ourLock')) status.openedByMe = true;
+
+      const otherOpen = record.multi.get('otherOpen') ?? [];
+      const otherLock = record.multi.get('otherLock') ?? [];
+      // otherLockN names the locker when present; otherwise an exclusive (+l)
+      // filetype means any other opener effectively holds it.
+      const holders = otherLock.length > 0 ? otherLock : has('otherLock') ? otherOpen : [];
+      const lockedBy = holders.length > 0 ? holders : otherOpen;
+      if (lockedBy.length > 0) status.lockedBy = lockedBy;
+
+      const haveRev = Number(record.fields.get('haveRev') ?? '0');
+      const headRev = Number(record.fields.get('headRev') ?? '0');
+      if (headRev > haveRev && !deletedAtHead) status.outOfDate = true;
+      return status;
+    });
+  }
+}
+
+/**
+ * Parse `p4 -ztag` output: `... field value` lines; a blank line separates
+ * records. Indexed fields (otherOpen0..N) collect into `multi` by prefix.
+ *
+ * @param {string} output
+ * @returns {{fields: Map<string, string>, multi: Map<string, string[]>}[]}
+ */
+export function parseZtag(output) {
+  const records = [];
+  let current = null;
+  for (const line of output.split('\n')) {
+    if (!line.startsWith('... ')) {
+      if (line.trim() === '') current = null; // record separator
+      continue;
+    }
+    if (!current) {
+      current = { fields: new Map(), multi: new Map() };
+      records.push(current);
+    }
+    const body = line.slice(4);
+    const space = body.indexOf(' ');
+    const field = space === -1 ? body : body.slice(0, space);
+    const value = space === -1 ? '' : body.slice(space + 1);
+    const indexed = /^([A-Za-z/]+?)(\d+)$/.exec(field);
+    if (indexed) {
+      const list = current.multi.get(indexed[1]) ?? [];
+      list.push(value);
+      current.multi.set(indexed[1], list);
+    } else {
+      current.fields.set(field, value);
+    }
+  }
+  return records;
 }

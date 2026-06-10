@@ -1,6 +1,8 @@
 import { existsSync, unlinkSync, rmSync } from 'fs';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
+import { writableBit } from '../vcStatus.js';
+import { resolve } from 'path';
 import { FilesystemProvider } from './filesystemProvider.js';
 
 const fs = new FilesystemProvider();
@@ -128,4 +130,18 @@ export class PlasticProvider {
 
     return okResult();
   }
+
+  /**
+   * Status for a batch of files. Full Plastic reads (cm status / lock list) are TODO; reports the writable bit.
+   *
+   * @param {string[]} filePaths
+   * @returns {import('../vcStatus.js').VCFileStatus[]}
+   */
+  status(filePaths) {
+    return filePaths.map((filePath) => {
+      const abs = resolve(filePath);
+      return { filePath: abs, system: 'plastic', writable: writableBit(abs) };
+    });
+  }
 }
+

@@ -41,15 +41,18 @@ VCLib.DeleteFile("/path/to/old-dialogue.json");
     * [Operations](#operations)
         * [writeTextFile](#writetextfilepath-content-encoding)
         * [writeBinaryFile](#writebinaryfilepath-data)
+        * [writeTextFiles](#writetextfilesfiles-encoding)
         * [prepareToWrite](#preparetowritefilepath)
         * [finishedWrite](#finishedwritefilepath)
         * [deleteFile](#deletefilefilepath)
         * [deleteFolder](#deletefolderfolderpath)
         * [renameFile](#renamefileoldpath-newpath)
         * [renameFolder](#renamefolderoldpath-newpath)
+    * [Status Reads](#status-reads)
     * [Return Values](#return-values)
     * [VC Detection](#vc-detection)
     * [Overriding VC Detection](#overriding-vc-detection)
+    * [Overriding Command Execution (for tests)](#overriding-command-execution-for-tests)
     * [Javascript](#javascript)
     * [C#](#c)
 * [Contributors](#contributors)
@@ -87,9 +90,11 @@ The library calls the relevant CLI under the hood. The appropriate CLI tool must
 
 ### Overview
 * Use **`writeTextFile`** or **`writeBinaryFile`** to write a file. These all-in-one helpers check out or unlock the file if needed, write it, and add it to VC if it's new. Works whether or not the file already exists. If the file already exists and its content is unchanged, no VCS operations are performed and the file is not rewritten (pass `forceWrite: true` to override this).
+* Use **`writeTextFiles`** to write a whole batch of files in one call, with a per-file outcome report — one refused file doesn't stop the rest.
 * If you need finer control, the steps are also available individually: call **`prepareToWrite`** before writing (checks out / unlocks the file, or no-ops if it doesn't exist yet), then write the file yourself, then call **`finishedWrite`** afterwards (adds the file to VC if it's new).
 * Call **`deleteFile`** or **`deleteFolder`** to remove files. Tracked files will be marked for deletion in the VC system; untracked files are just deleted from disk.
 * Call **`renameFile`** or **`renameFolder`** to move or rename files and directories. Tracked items are moved within the VC system; untracked items are moved on disk.
+* Call **`fileStatus`** with a batch of paths to find out, per file, whether it's tracked, writable, locked by someone else, checked out by you, or out of date — see [Status Reads](#status-reads). Useful for editor UI ("this file is checked out by Bob") without spawning one CLI call per file.
 
 You don't need to tell the library which VC system is in use — it detects this automatically. See [VC Detection](#vc-detection) below.
 
@@ -109,6 +114,13 @@ An all-in-one helper that calls `prepareToWrite`, writes `data` as raw bytes, th
 - If the file already exists and its content matches `data`, **no VCS operations are performed and the file is not rewritten**.
 - Set `forceWrite` to `true` to bypass the content check and always write (default: `false`).
 - Returns the result from whichever step failed, or the result of `finishedWrite` on success.
+
+#### `writeTextFiles(files, encoding)`
+Writes a **batch** of `{ filePath, content }` entries through VC in one call, creating parent directories as needed. Each file goes through the same pipeline as `writeTextFile` (checkout if needed → write → add if new, with the unchanged-content short-circuit).
+
+- Returns `{ success, results }` where `results` holds one outcome per file (`filePath`, `success`, `status`, `message`).
+- A refused file (e.g. locked by another user) **does not stop the rest of the batch** — it comes back in `results` with its reason, so a tool can report exactly which files failed and why.
+- `success` on the batch is `true` only when every file succeeded.
 
 #### `prepareToWrite(filePath)`
 Prepares a file path for writing. Use this when you need to write the file yourself rather than via `writeTextFile` / `writeBinaryFile`.
@@ -135,6 +147,48 @@ Renames (moves) a file, informing VC of the change if the file is tracked (`git 
 #### `renameFolder(oldPath, newPath)`
 Renames (moves) a folder, informing VC of the change for all tracked contents. Untracked content is moved on disk. No-op if the source does not exist.
 
+### Status Reads
+**`fileStatus(filePaths)`** answers "what state are these files in?" for a whole batch of paths at once — the read-side counterpart to the write operations above. It's designed for tool UI: greying out files locked by someone else, showing who has them, flagging stale copies.
+
+```javascript
+import { fileStatus } from '@wildwinter/simple-vc-lib';
+
+for (const st of fileStatus(scenePaths)) {
+    if (st.lockedBy) console.log(`${st.filePath} is checked out by ${st.lockedBy.join(', ')}`);
+}
+```
+
+```csharp
+foreach (var st in VCLib.FileStatus(scenePaths)) {
+    if (st.LockedBy is not null)
+        Console.WriteLine($"{st.FilePath} is checked out by {string.Join(", ", st.LockedBy)}");
+}
+```
+
+Each result has:
+
+| Field | Type | Description |
+|---|---|---|
+| `filePath` | string | Absolute path of the file |
+| `system` | string | `git`, `perforce`, `plastic`, `svn`, or `filesystem` |
+| `writable` | `bool` | Writable on disk right now (the read-only bit — under lock-based workflows this is the cheap "can I edit this?" signal; a file not on disk yet counts as writable) |
+| `tracked` | `bool?` | Known to the VC system (tracked / in the depot). Absent when the provider can't say |
+| `openedByMe` | `bool?` | Opened / checked out / locked by the current user |
+| `lockedBy` | `string[]?` | Who else has it open or locked, e.g. `bob@bob-ws` |
+| `outOfDate` | `bool?` | A newer revision exists on the server |
+
+**Calls are batched** — paths are grouped by provider and repository, so a whole project's worth of files costs a spawn or two, not one per file:
+
+| System | How | Depth |
+|---|---|---|
+| **Perforce** | ONE `p4 -ztag fstat` for the whole batch | Full: tracked, checkout/lock owners, out-of-date |
+| **Git** | One `git status --porcelain -z` + one `git lfs locks --verify --json` per repository | Full: tracked, plus lock ownership when git-lfs locking is in use (git itself has no locks) |
+| **Plastic SCM** | — | Writable bit only for now (full reads TODO) |
+| **SVN** | — | Writable bit only for now (full reads TODO; the writable bit still reflects `svn:needs-lock` workflows) |
+| **Filesystem** | — | Writable bit only |
+
+Path matching is done on repo-relative paths internally, so symlinked locations (such as macOS `/var` → `/private/var` temp directories) report correctly.
+
 ### Return Values
 All operations return a result object with three fields:
 
@@ -145,6 +199,8 @@ All operations return a result object with three fields:
 | `message` | string | Human-readable detail, especially on failure |
 
 `locked` and `outOfDate` are only produced by `prepareToWrite`, for VC systems that support exclusive locking or require syncing before editing.
+
+Two exceptions to the single-result shape: `writeTextFiles` returns `{ success, results }` with one such outcome per file (plus its `filePath`), and `fileStatus` returns the status records described under [Status Reads](#status-reads).
 
 ### VC Detection
 The library detects the active VC system automatically, in this order:
@@ -183,6 +239,38 @@ VCLib.ClearProvider();                // Restore auto-detection
 
 Available provider classes: `GitProvider`, `PerforceProvider`, `PlasticProvider`, `SvnProvider`, `FilesystemProvider`.
 
+### Overriding Command Execution (for tests)
+Every CLI call goes through a single command runner, and you can override it — the same pattern as `setProvider`. This lets tests feed **canned CLI output** to the providers, so logic like the Perforce `fstat` parsing is unit-testable on machines with no `p4` installed (and no live workspace):
+
+**Javascript:**
+```javascript
+import { setCommandRunner, clearCommandRunner, setProvider, PerforceProvider, fileStatus } from '@wildwinter/simple-vc-lib';
+
+setProvider(new PerforceProvider());
+setCommandRunner((command, args) => ({
+    exitCode: 0,
+    output: '... depotFile //depot/a.txt\n... clientFile /ws/a.txt\n... headRev 7\n... haveRev 7',
+    error: '',
+}));
+
+const [st] = fileStatus(['/ws/a.txt']); // parsed from the canned transcript
+
+clearCommandRunner(); // restore real execution
+```
+
+**C#:**
+```csharp
+VCLib.SetProvider(new PerforceProvider());
+VCLib.SetCommandRunner((command, args) =>
+    new CommandResult(0, "... depotFile //depot/a.txt\n... clientFile /ws/a.txt\n... headRev 7\n... haveRev 7", ""));
+
+var st = VCLib.FileStatus(["/ws/a.txt"])[0];
+
+VCLib.ClearCommandRunner(); // restore real execution
+```
+
+The override is global static state, so tests that use it (or `setProvider`) should not run in parallel with tests doing real VC operations.
+
 ### Javascript
 Install via npm:
 ```bash
@@ -193,10 +281,10 @@ Or download `simpleVcLib.js` (ESM) or `simpleVcLib.cjs` (CommonJS) from the [Git
 
 ```javascript
 // ESM (npm)
-import { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from '@wildwinter/simple-vc-lib';
+import { writeTextFile, writeBinaryFile, writeTextFiles, fileStatus, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from '@wildwinter/simple-vc-lib';
 
 // ESM (direct file)
-import { writeTextFile, writeBinaryFile, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from './simpleVcLib.js';
+import { writeTextFile, writeBinaryFile, writeTextFiles, fileStatus, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from './simpleVcLib.js';
 
 // All-in-one helpers (checkout + write + add to VC)
 const result = writeTextFile('/path/to/myfile.json', JSON.stringify(data), 'utf8');
@@ -208,6 +296,20 @@ if (!result.success) {
 const binResult = writeBinaryFile('/path/to/myfile.bin', buffer);
 if (!binResult.success) {
     console.error(binResult.message);
+}
+
+// Batch write — one call, per-file outcomes; a refused file doesn't stop the rest
+const batch = writeTextFiles([
+    { filePath: '/path/to/scenes/opening.json', content: openingJson },
+    { filePath: '/path/to/scenes/finale.json', content: finaleJson },
+]);
+for (const r of batch.results.filter((r) => !r.success)) {
+    console.error(`${r.filePath}: ${r.message}`); // e.g. "locked by bob@bob-ws"
+}
+
+// Batched status — tracked / writable / locked-by / out-of-date for a whole set of files
+for (const st of fileStatus(['/path/to/scenes/opening.json', '/path/to/scenes/finale.json'])) {
+    if (st.lockedBy) console.log(`${st.filePath} is checked out by ${st.lockedBy.join(', ')}`);
 }
 
 // Renaming
@@ -263,6 +365,19 @@ if (!result2.Success)
 var binResult = VCLib.WriteBinaryFile("/path/to/myfile.bin", data);
 if (!binResult.Success)
     Console.WriteLine(binResult.Message);
+
+// Batch write — one call, per-file outcomes; a refused file doesn't stop the rest
+var batch = VCLib.WriteTextFiles([
+    new VCFileWrite("/path/to/scenes/opening.json", openingJson),
+    new VCFileWrite("/path/to/scenes/finale.json", finaleJson),
+]);
+foreach (var r in batch.Results.Where(r => !r.Success))
+    Console.WriteLine($"{r.FilePath}: {r.Message}"); // e.g. "locked by bob@bob-ws"
+
+// Batched status — tracked / writable / locked-by / out-of-date for a whole set of files
+foreach (var st in VCLib.FileStatus(["/path/to/scenes/opening.json", "/path/to/scenes/finale.json"]))
+    if (st.LockedBy is not null)
+        Console.WriteLine($"{st.FilePath} is checked out by {string.Join(", ", st.LockedBy)}");
 
 // Manual approach — if you need to write the file yourself
 var prep = VCLib.PrepareToWrite("/path/to/myfile.json");

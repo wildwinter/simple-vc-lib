@@ -1,7 +1,8 @@
 import { existsSync, unlinkSync, rmSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, resolve } from 'path';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
+import { writableBit } from '../vcStatus.js';
 import { FilesystemProvider } from './filesystemProvider.js';
 
 const fs = new FilesystemProvider();
@@ -126,4 +127,19 @@ export class SvnProvider {
 
     return okResult();
   }
+
+  /**
+   * Status for a batch of files. Full SVN reads (svn status --xml, lock owners) are TODO; the
+   * writable bit still drives lock-style UI under svn:needs-lock.
+   *
+   * @param {string[]} filePaths
+   * @returns {import('../vcStatus.js').VCFileStatus[]}
+   */
+  status(filePaths) {
+    return filePaths.map((filePath) => {
+      const abs = resolve(filePath);
+      return { filePath: abs, system: 'svn', writable: writableBit(abs) };
+    });
+  }
 }
+

@@ -117,4 +117,11 @@ public class SvnProvider : IVCProvider
 
     private static CommandRunner.Result Svn(string[] args) =>
         CommandRunner.Run("svn", args);
+    /// <summary>
+    /// Status for a batch of files. Full SVN reads (svn status --xml, lock owners) are TODO;
+    /// the writable bit still drives lock-style UI under svn:needs-lock.
+    /// </summary>
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths) =>
+        filePaths.Select(p => new VCFileStatus(
+            Path.GetFullPath(p), "svn", FileStatusHelpers.WritableBit(p))).ToList();
 }

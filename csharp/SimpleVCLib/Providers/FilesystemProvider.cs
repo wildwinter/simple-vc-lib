@@ -89,4 +89,10 @@ public class FilesystemProvider : IVCProvider
             return VCResult.Error($"Cannot rename folder '{oldPath}' to '{newPath}': {ex.Message}");
         }
     }
+    /// <summary>
+    /// Status for a batch of files. No VCS: just the writable bit.
+    /// </summary>
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths) =>
+        filePaths.Select(p => new VCFileStatus(
+            Path.GetFullPath(p), "filesystem", FileStatusHelpers.WritableBit(p))).ToList();
 }

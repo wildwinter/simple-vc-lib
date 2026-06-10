@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace SimpleVCLib;
 
 /// <summary>
@@ -107,4 +109,115 @@ public class GitProvider : IVCProvider
 
     private static CommandRunner.Result Git(string[] args, string cwd) =>
         CommandRunner.Run("git", ["-C", cwd, ..args], workingDirectory: cwd);
+    /// <summary>
+    /// Status for a batch of files: per repository root, ONE
+    /// <c>git status --porcelain -z</c> (tracked-ness) plus - when git-lfs is in
+    /// play - ONE <c>git lfs locks --verify --json</c> (<c>--verify</c> splits
+    /// ours vs theirs). git itself has no locks; lock-based git workflows are
+    /// git-lfs locks.
+    /// <para>
+    /// All matching is done on REPO-RELATIVE paths (via <c>rev-parse
+    /// --show-prefix</c>), never by joining absolute paths - so symlinked
+    /// ancestors (macOS <c>/var</c> -> <c>/private/var</c>) cannot break the
+    /// lookup.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths)
+    {
+        // Group by repository root so one repo costs two spawns, not 2-per-file.
+        // Per directory, one `rev-parse --show-toplevel --show-prefix` yields both
+        // the canonical root and the dir's repo-relative prefix.
+        var infoByDir = new Dictionary<string, (string? Root, string Prefix)>();
+        var groups = new Dictionary<string, List<(string Input, string RelKey)>>();
+        foreach (var filePath in filePaths)
+        {
+            var abs = Path.GetFullPath(filePath);
+            var dir = Path.GetDirectoryName(abs)!;
+            if (!infoByDir.TryGetValue(dir, out var info))
+            {
+                var result = Git(["rev-parse", "--show-toplevel", "--show-prefix"], dir);
+                if (result.ExitCode == 0)
+                {
+                    var lines = result.Output.Split('\n');
+                    info = (lines[0].Trim(), lines.Length > 1 ? lines[1].Trim() : "");
+                }
+                else
+                {
+                    info = (null, "");
+                }
+                infoByDir[dir] = info;
+            }
+            var key = info.Root ?? "(none)";
+            if (!groups.TryGetValue(key, out var group))
+                groups[key] = group = new List<(string, string)>();
+            group.Add((filePath, info.Prefix + Path.GetFileName(abs)));
+        }
+
+        var byInput = new Dictionary<string, VCFileStatus>();
+        foreach (var (key, files) in groups)
+        {
+            if (key == "(none)")
+            {
+                // Not inside a repository - report writability only.
+                foreach (var (input, _) in files)
+                    byInput[input] = new VCFileStatus(Path.GetFullPath(input), "git", FileStatusHelpers.WritableBit(input));
+                continue;
+            }
+            var root = key;
+
+            // -z output: `XY <path>\0` entries, paths relative to the repo root.
+            var st = Git(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], root);
+            var states = new Dictionary<string, string>();
+            if (st.ExitCode == 0 && st.Output.Length > 0)
+            {
+                foreach (var entry in st.Output.Split('\0'))
+                {
+                    if (entry.Length < 4) continue;
+                    states[entry[3..]] = entry[..2];
+                }
+            }
+
+            // LFS locks (optional - skipped silently when lfs is absent or errors).
+            // Lock paths are repo-relative already.
+            var ours = new HashSet<string>();
+            var theirs = new Dictionary<string, List<string>>();
+            var locks = Git(["lfs", "locks", "--verify", "--json"], root);
+            if (locks.ExitCode == 0 && locks.Output.StartsWith('{'))
+            {
+                try
+                {
+                    using var parsed = JsonDocument.Parse(locks.Output);
+                    if (parsed.RootElement.TryGetProperty("ours", out var oursEl))
+                        foreach (var l in oursEl.EnumerateArray())
+                            ours.Add(l.GetProperty("path").GetString()!);
+                    if (parsed.RootElement.TryGetProperty("theirs", out var theirsEl))
+                        foreach (var l in theirsEl.EnumerateArray())
+                        {
+                            var rel = l.GetProperty("path").GetString()!;
+                            var owner = l.TryGetProperty("owner", out var o) && o.TryGetProperty("name", out var n)
+                                ? n.GetString() ?? "unknown" : "unknown";
+                            if (!theirs.TryGetValue(rel, out var list)) theirs[rel] = list = new List<string>();
+                            list.Add(owner);
+                        }
+                }
+                catch (JsonException)
+                {
+                    // Unparseable lock output - status is still useful without it.
+                }
+            }
+
+            foreach (var (input, relKey) in files)
+            {
+                // Absent from porcelain output = clean & tracked; '??' = untracked.
+                var tracked = !states.TryGetValue(relKey, out var xy) || xy != "??";
+                byInput[input] = new VCFileStatus(
+                    Path.GetFullPath(input), "git", FileStatusHelpers.WritableBit(input),
+                    Tracked: tracked,
+                    OpenedByMe: ours.Contains(relKey) ? true : null,
+                    LockedBy: theirs.TryGetValue(relKey, out var owners) ? owners : null);
+            }
+        }
+
+        return filePaths.Select(p => byInput[p]).ToList();
+    }
 }

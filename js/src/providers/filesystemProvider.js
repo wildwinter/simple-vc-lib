@@ -1,5 +1,7 @@
 import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, renameSync, constants } from 'fs';
 import { okResult, errorResult } from '../vcResult.js';
+import { writableBit } from '../vcStatus.js';
+import { resolve } from 'path';
 
 function isWritable(filePath) {
   try {
@@ -79,4 +81,18 @@ export class FilesystemProvider {
       return errorResult('error', `Cannot rename folder '${oldPath}' to '${newPath}': ${e.message}`);
     }
   }
+
+  /**
+   * Status for a batch of files. No VCS: just the writable bit.
+   *
+   * @param {string[]} filePaths
+   * @returns {import('../vcStatus.js').VCFileStatus[]}
+   */
+  status(filePaths) {
+    return filePaths.map((filePath) => {
+      const abs = resolve(filePath);
+      return { filePath: abs, system: 'filesystem', writable: writableBit(abs) };
+    });
+  }
 }
+

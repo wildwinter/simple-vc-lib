@@ -12,15 +12,16 @@
   ],
   "license": "MIT",
   "author": "Ian Thomas",
+  "repository": { "type": "git", "url": "git+https://github.com/wildwinter/simple-vc-lib.git", "directory": "js" },
   "type": "module",
   "main": "dist/simpleVcLib.cjs",
   "module": "dist/simpleVcLib.js",
   "types": "dist/simpleVcLib.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/simpleVcLib.d.ts",
       "import": "./dist/simpleVcLib.js",
-      "require": "./dist/simpleVcLib.cjs",
-      "types": "./dist/simpleVcLib.d.ts"
+      "require": "./dist/simpleVcLib.cjs"
     }
   },
   "files": [
@@ -32,7 +33,8 @@
     "test": "npm run build && npx mocha",
     "perforce-tests": "npm run build && npx mocha test/perforce.test.js",
     "pack": "npm run build && shx mkdir -p ../dist/v$npm_package_version && shx rm -rf ../dist/v$npm_package_version/simple-vc-lib-js-v$npm_package_version.zip && zip -r ../dist/v$npm_package_version/simple-vc-lib-js-v$npm_package_version.zip ./dist",
-    "publish-npm": "npm run build && shx cp ../README.md ./README.md && shx cp ../LICENSE ./LICENSE && npm publish --access public; shx rm -f ./README.md ./LICENSE"
+    "publish-npm": "npm run build && node scripts/publish.mjs",
+    "publish-npm-dry": "npm run build && node scripts/publish.mjs --dry-run"
   },
   "devDependencies": {
     "chai": "^5.1.2",
