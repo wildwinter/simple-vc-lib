@@ -29,8 +29,42 @@ function fstat(filePath) {
   return result.output;
 }
 
-function isInDepot(filePath) {
-  return isInDepotFstat(fstat(filePath));
+/**
+ * The pending changelist action for a file ('add', 'edit', 'delete',
+ * 'move/add', 'move/delete', ...) or null if the file is not opened.
+ */
+function pendingAction(info) {
+  return info?.match(/^\.\.\. action (\S+)/m)?.[1] ?? null;
+}
+
+/**
+ * Depot path of the other half of a pending move, or null.
+ */
+function movedCounterpart(info) {
+  return info?.match(/^\.\.\. movedFile (\S+)/m)?.[1] ?? null;
+}
+
+/**
+ * The file is scheduled for delete (or is the source of a pending rename) but
+ * exists again on disk. Cancel the pending delete keeping the local content,
+ * then reopen the file for edit.
+ *
+ * p4 refuses to revert a move/delete source on its own ('has been moved, not
+ * reverted', exit 0); reverting the move/add half clears both ends of the pair.
+ */
+function reopenAfterPendingDelete(filePath, info, action) {
+  if (action === 'move/delete') {
+    const target = movedCounterpart(info);
+    p4(['revert', '-k', target ?? filePath]);
+    // The renamed half is now untracked but still on disk; reopen it for add
+    // so the earlier rename isn't silently dropped from the changelist.
+    if (target) p4(['add', target]);
+  } else {
+    p4(['revert', '-k', filePath]);
+  }
+  const editResult = p4(['edit', filePath]);
+  if (editResult.exitCode === 0) return okResult('File reopened for edit after pending delete was reverted');
+  return errorResult('error', `Cannot reopen '${filePath}' for edit after reverting pending delete: ${editResult.error || editResult.output}`);
 }
 
 function isInDepotFstat(info) {
@@ -66,8 +100,17 @@ export class PerforceProvider {
   prepareToWrite(filePath) {
     if (!existsSync(filePath)) return okResult();
 
-    if (!isInDepot(filePath)) {
+    const info = fstat(filePath);
+    if (!isInDepotFstat(info)) {
       return fs.prepareToWrite(filePath);
+    }
+
+    // Re-created on disk while scheduled for delete: cancel the delete first.
+    // `p4 edit` on a pending-delete file only warns (exit 0) and leaves the
+    // delete pending, so the file would still be deleted at next submit.
+    const action = pendingAction(info);
+    if (action === 'delete' || action === 'move/delete') {
+      return reopenAfterPendingDelete(filePath, info, action);
     }
 
     const result = p4(['edit', filePath]);
@@ -95,11 +138,9 @@ export class PerforceProvider {
 
     // File has a pending delete in a changelist but was just re-written to disk.
     // Cancel the delete (keeping the new local content) then reopen for edit.
-    if (info.includes('... action delete')) {
-      p4(['revert', '-k', filePath]);
-      const editResult = p4(['edit', filePath]);
-      if (editResult.exitCode === 0) return okResult('File reopened for edit after pending delete was reverted');
-      return errorResult('error', `Cannot reopen '${filePath}' for edit after reverting pending delete: ${editResult.error || editResult.output}`);
+    const action = pendingAction(info);
+    if (action === 'delete' || action === 'move/delete') {
+      return reopenAfterPendingDelete(filePath, info, action);
     }
 
     if (isInDepotFstat(info)) return okResult();
@@ -113,43 +154,124 @@ export class PerforceProvider {
   }
 
   deleteFile(filePath) {
-    if (!existsSync(filePath)) return okResult();
+    // No early-out on a missing local file: the file may still be opened in a
+    // pending changelist (e.g. added then deleted between submits), and that
+    // stale entry would abort the eventual submit and leave it locked.
+    const info = fstat(filePath);
+    const action = pendingAction(info);
 
-    if (isInDepot(filePath)) {
-      const result = p4(['delete', filePath]);
-      if (result.exitCode !== 0)
-        return errorResult('error', `Cannot delete '${filePath}' from Perforce: ${result.error || result.output}`);
-      // p4 delete marks for deletion but leaves the file on disk as read-only.
-      // Physically remove it, consistent with git rm and svn delete.
+    const removeLocal = () => {
+      if (!existsSync(filePath)) return null;
       try {
-        if (existsSync(filePath)) {
-          chmodSync(filePath, 0o666);
-          unlinkSync(filePath);
-        }
+        chmodSync(filePath, 0o666);
+        unlinkSync(filePath);
+        return null;
       } catch (e) {
         return errorResult('error', `Cannot remove '${filePath}' from disk: ${e.message}`);
       }
+    };
+
+    // Open for add (never submitted): there is nothing in the depot to delete.
+    // `p4 delete` would only warn (exit 0) and leave the add pending, so
+    // revert it, then remove the local file.
+    if (action === 'add') {
+      p4(['revert', '-k', filePath]);
+      return removeLocal() ?? okResult();
+    }
+
+    // Target half of a pending rename: cancel the move (reverting the move/add
+    // half clears both ends, keeping disk files), schedule the original path
+    // for delete (p4 delete works without a local copy), and remove this one.
+    if (action === 'move/add') {
+      const source = movedCounterpart(info);
+      p4(['revert', '-k', filePath]);
+      if (source) p4(['delete', source]);
+      return removeLocal() ?? okResult();
+    }
+
+    // Already scheduled for delete: just make sure the local copy is gone.
+    if (action === 'delete' || action === 'move/delete') {
+      return removeLocal() ?? okResult();
+    }
+
+    // Open for edit/integrate/etc: revert before scheduling the delete, since
+    // `p4 delete` refuses files that are already open (warns, exit 0).
+    if (action !== null) {
+      p4(['revert', '-k', filePath]);
+    }
+
+    if (isInDepotFstat(info)) {
+      // Remove the local copy first: `p4 delete` refuses to clobber a writable
+      // local file (e.g. right after the edit revert above), but happily
+      // schedules the delete when the local copy is already gone.
+      const localError = removeLocal();
+      if (localError) return localError;
+      const result = p4(['delete', filePath]);
+      if (result.exitCode !== 0)
+        return errorResult('error', `Cannot delete '${filePath}' from Perforce: ${result.error || result.output}`);
       return okResult();
     }
 
-    try {
-      unlinkSync(filePath);
-      return okResult();
-    } catch (e) {
-      return errorResult('error', `Cannot delete '${filePath}': ${e.message}`);
-    }
+    return removeLocal() ?? okResult();
   }
 
   renameFile(oldPath, newPath) {
     if (!existsSync(oldPath)) return okResult();
-    if (isInDepot(oldPath)) {
-      p4(['edit', oldPath]);
-      const result = p4(['move', oldPath, newPath]);
-      const combined = ((result.output || '') + ' ' + (result.error || '')).toLowerCase();
-      if (result.exitCode === 0 && !combined.includes('not opened for')) return okResult();
-      return errorResult('error', `Cannot rename '${oldPath}' in Perforce: ${result.error || result.output}`);
+
+    // A pending state on the destination blocks the rename: p4 move refuses
+    // to target an opened or existing file ('can't move to an existing file',
+    // and only warns at exit 0). Clear it first.
+    const dstInfo = fstat(newPath);
+    const dstAction = pendingAction(dstInfo);
+    if (dstAction === 'add' || dstAction === 'move/add') {
+      // The destination was created in this changelist: deleting it unwinds
+      // the pending add (and any rename pair) and removes the stale local copy.
+      const cleared = this.deleteFile(newPath);
+      if (!cleared.success) return cleared;
+    } else if (dstAction === 'delete' || dstAction === 'move/delete') {
+      // The destination exists at head and is scheduled for delete; p4 move
+      // cannot target it even so. Emulate the rename: cancel the delete, carry
+      // the source content over, reopen the destination for edit, and delete
+      // the source path. (The edit must come after the file is in place —
+      // p4 edit fails trying to chmod a missing local file.)
+      p4(['revert', '-k', newPath]);
+      try {
+        if (existsSync(newPath)) {
+          chmodSync(newPath, 0o666);
+          unlinkSync(newPath);
+        }
+      } catch (e) {
+        return errorResult('error', `Cannot rename '${oldPath}' over '${newPath}': ${e.message}`);
+      }
+      const moved = fs.renameFile(oldPath, newPath);
+      if (!moved.success) return moved;
+      const editResult = p4(['edit', newPath]);
+      if (editResult.exitCode !== 0)
+        return errorResult('error', `Cannot rename '${oldPath}' over pending-delete '${newPath}': ${editResult.error || editResult.output}`);
+      return this.deleteFile(oldPath);
     }
-    return fs.renameFile(oldPath, newPath);
+
+    const info = fstat(oldPath);
+    if (!isInDepotFstat(info)) return fs.renameFile(oldPath, newPath);
+
+    const action = pendingAction(info);
+    if (action === 'delete' || action === 'move/delete') {
+      // Re-created on disk while scheduled for delete: cancel the delete so
+      // the file can be reopened and moved.
+      const reopened = reopenAfterPendingDelete(oldPath, info, action);
+      if (!reopened.success) return reopened;
+    } else if (action === null) {
+      p4(['edit', oldPath]);
+    }
+    // Files already open for add/edit/move-add can be moved directly.
+
+    const result = p4(['move', oldPath, newPath]);
+    // p4 move reports several refusals at exit 0 ('not opened for edit',
+    // 'can't move to an existing file', 'is synced; use -f') — require the
+    // positive 'moved from' confirmation instead of blacklisting them.
+    const combined = ((result.output || '') + ' ' + (result.error || '')).toLowerCase();
+    if (result.exitCode === 0 && combined.includes('moved from')) return okResult();
+    return errorResult('error', `Cannot rename '${oldPath}' in Perforce: ${result.error || result.output}`);
   }
 
   renameFolder(oldPath, newPath) {

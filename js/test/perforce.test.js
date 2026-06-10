@@ -247,4 +247,209 @@ describe('PerforceProvider', function () {
     assert.isTrue(result.success, result.message);
     assert.isFalse(existsSync(dirPath));
   });
+
+  // -------------------------------------------------------------------------
+  // Repeated artifact-generation runs without a submit in between. These walk
+  // files through pending states (open for add/edit/delete) that the naive
+  // p4 commands only warn about (exit 0), silently leaving stale changelist
+  // entries that abort the eventual submit and leave it locked.
+
+  it('deleteFile on a file open for add reverts the add', function () {
+    const filePath = join(testDir, 'cycle-add-del.txt');
+    writeFileSync(filePath, 'run1');
+    assert.isTrue(finishedWrite(filePath).success);
+
+    const result = deleteFile(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(filePath));
+
+    // Nothing may stay pending: a leftover open-for-add with no local file
+    // aborts the next submit.
+    const opened = p4(['opened', filePath]);
+    assert.include(opened.stdout + opened.stderr, 'not opened', 'file should not remain opened after deleteFile');
+  });
+
+  it('deleteFile on a file open for edit cancels the edit and schedules the delete', function () {
+    const filePath = join(testDir, 'cycle-edit-del.txt');
+    submitFile(filePath, 'original');
+    assert.isTrue(prepareToWrite(filePath).success);
+    writeFileSync(filePath, 'rewritten');
+
+    const result = deleteFile(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(filePath));
+
+    const fstat = p4(['fstat', '-Od', filePath]);
+    assert.include(fstat.stdout, 'action delete', 'file should be open for delete, not edit');
+  });
+
+  it('deleteFile cleans up pending p4 state when the local file is already missing', function () {
+    const filePath = join(testDir, 'cycle-phantom.txt');
+    writeFileSync(filePath, 'run1');
+    assert.isTrue(finishedWrite(filePath).success);
+    // Simulate an earlier run (or the tool itself) removing the file directly.
+    rmSync(filePath, { force: true });
+
+    const result = deleteFile(filePath);
+    assert.isTrue(result.success, result.message);
+
+    const opened = p4(['opened', filePath]);
+    assert.include(opened.stdout + opened.stderr, 'not opened', 'stale open-for-add entry should be reverted');
+  });
+
+  it('prepareToWrite cancels a pending delete on a re-created file', function () {
+    const filePath = join(testDir, 'cycle-ptw-pending-del.txt');
+    submitFile(filePath, 'original');
+    p4(['delete', filePath]);
+    writeFileSync(filePath, 'regenerated');
+
+    // p4 edit on a pending-delete file only warns and leaves the delete
+    // pending — the regenerated file would be deleted at next submit.
+    const result = prepareToWrite(filePath);
+    assert.isTrue(result.success, result.message);
+
+    const fstat = p4(['fstat', filePath]);
+    assert.include(fstat.stdout, 'action edit', 'fstat should report open for edit, not delete');
+    assert.notInclude(fstat.stdout, 'action delete');
+  });
+
+  it('repeated add/delete/re-create cycles leave a submittable changelist', function () {
+    const filePath = join(testDir, 'cycle-repeat.txt');
+    for (let run = 1; run <= 3; run++) {
+      writeFileSync(filePath, `run ${run}`);
+      assert.isTrue(finishedWrite(filePath).success, `finishedWrite failed on run ${run}`);
+      assert.isTrue(deleteFile(filePath).success, `deleteFile failed on run ${run}`);
+    }
+    writeFileSync(filePath, 'final');
+    assert.isTrue(finishedWrite(filePath).success);
+
+    const submit = p4(['submit', '-d', 'repeated cycles (simple-vc-lib test)', filePath]);
+    assert.equal(submit.status, 0, `submit after repeated cycles failed:\n${submit.stdout}\n${submit.stderr}`);
+  });
+
+  it('deleteFile on the target of a pending rename schedules the source for delete', function () {
+    const oldPath = join(testDir, 'cycle-move-src.txt');
+    const newPath = join(testDir, 'cycle-move-dst.txt');
+    submitFile(oldPath, 'content');
+    assert.isTrue(renameFile(oldPath, newPath).success);
+
+    const result = deleteFile(newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(newPath));
+
+    // Net intent: source was renamed, rename target deleted — source must end
+    // up scheduled for delete so the depot matches the disk.
+    const srcStat = p4(['fstat', '-Od', oldPath]);
+    assert.include(srcStat.stdout, 'action delete', 'rename source should be open for delete');
+    const opened = p4(['opened', newPath]);
+    assert.include(opened.stdout + opened.stderr, 'not opened', 'rename target should not remain opened');
+  });
+
+  it('renameFile of a re-created pending-delete file cancels the delete and moves', function () {
+    const oldPath = join(testDir, 'cycle-ren-pending-src.txt');
+    const newPath = join(testDir, 'cycle-ren-pending-dst.txt');
+    submitFile(oldPath, 'original');
+    p4(['delete', oldPath]);
+    writeFileSync(oldPath, 'regenerated');
+
+    const result = renameFile(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(newPath));
+    assert.equal(readFileSync(newPath, 'utf8'), 'regenerated');
+
+    const dstStat = p4(['fstat', newPath]);
+    assert.include(dstStat.stdout, 'action', 'destination should be opened after rename');
+  });
+
+  it('renameFile onto a pending-delete destination replaces it', function () {
+    const oldPath = join(testDir, 'cycle-ren-onto-src.txt');
+    const newPath = join(testDir, 'cycle-ren-onto-dst.txt');
+    // Seed both files first: submitFile submits the whole default changelist,
+    // so the pending delete must be staged after the last submit.
+    submitFile(newPath, 'old destination');
+    submitFile(oldPath, 'source content');
+    assert.isTrue(deleteFile(newPath).success);
+
+    // p4 move refuses a pending-delete target ('can't move to an existing
+    // file', exit 0) — the provider must emulate the rename instead of
+    // silently doing nothing.
+    const result = renameFile(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(newPath));
+    assert.equal(readFileSync(newPath, 'utf8'), 'source content');
+
+    const dstStat = p4(['fstat', newPath]);
+    assert.include(dstStat.stdout, 'action edit', 'destination should be reopened for edit with the new content');
+    const srcStat = p4(['fstat', '-Od', oldPath]);
+    assert.include(srcStat.stdout, 'action delete', 'source should be scheduled for delete');
+  });
+
+  it('renameFile onto a destination open for add unwinds the stale add', function () {
+    const oldPath = join(testDir, 'cycle-ren-add-src.txt');
+    const newPath = join(testDir, 'cycle-ren-add-dst.txt');
+    // Seed the source first: submitFile submits the whole default changelist,
+    // so the destination's pending add must be staged after the last submit.
+    submitFile(oldPath, 'source content');
+    writeFileSync(newPath, 'stale artifact');
+    assert.isTrue(finishedWrite(newPath).success);
+
+    const result = renameFile(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.equal(readFileSync(newPath, 'utf8'), 'source content');
+
+    const dstStat = p4(['fstat', newPath]);
+    assert.include(dstStat.stdout, 'action', 'destination should be opened after rename');
+  });
+
+  it('renameFile of a file open for add moves the pending add', function () {
+    const oldPath = join(testDir, 'cycle-ren-openadd-src.txt');
+    const newPath = join(testDir, 'cycle-ren-openadd-dst.txt');
+    writeFileSync(oldPath, 'fresh artifact');
+    assert.isTrue(finishedWrite(oldPath).success);
+
+    const result = renameFile(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
+    assert.isTrue(existsSync(newPath));
+
+    const opened = p4(['opened', oldPath]);
+    assert.include(opened.stdout + opened.stderr, 'not opened', 'old path should not remain opened');
+    const dstStat = p4(['fstat', newPath]);
+    assert.include(dstStat.stdout, 'action add', 'new path should be open for add');
+  });
+
+  it('renameFile onto an existing tracked file reports an error, not silent success', function () {
+    const oldPath = join(testDir, 'cycle-ren-clobber-src.txt');
+    const newPath = join(testDir, 'cycle-ren-clobber-dst.txt');
+    submitFile(oldPath, 'source');
+    submitFile(newPath, 'destination');
+
+    // p4 move onto an existing depot file fails with exit 0; the provider must
+    // surface that as an error instead of reporting a rename that never happened.
+    const result = renameFile(oldPath, newPath);
+    assert.isFalse(result.success, 'rename onto an existing tracked file should fail');
+    assert.isTrue(existsSync(oldPath), 'source must be untouched after the failed rename');
+    assert.equal(readFileSync(newPath, 'utf8'), 'destination');
+  });
+
+  it('finishedWrite on a re-created rename source keeps the rename target', function () {
+    const oldPath = join(testDir, 'cycle-resrc-src.txt');
+    const newPath = join(testDir, 'cycle-resrc-dst.txt');
+    submitFile(oldPath, 'content');
+    assert.isTrue(renameFile(oldPath, newPath).success);
+
+    // Tool regenerates an artifact at the old name in a later run.
+    writeFileSync(oldPath, 'regenerated');
+    const result = finishedWrite(oldPath);
+    assert.isTrue(result.success, result.message);
+
+    const srcStat = p4(['fstat', oldPath]);
+    assert.include(srcStat.stdout, 'action edit', 'recreated source should be open for edit');
+    const dstStat = p4(['fstat', newPath]);
+    assert.include(dstStat.stdout, 'action add', 'rename target should be reopened for add');
+    assert.isTrue(existsSync(newPath));
+  });
 });

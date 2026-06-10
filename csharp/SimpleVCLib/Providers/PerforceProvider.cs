@@ -16,8 +16,16 @@ public class PerforceProvider : IVCProvider
     {
         if (!File.Exists(filePath)) return VCResult.Ok();
 
-        if (!IsInDepot(filePath))
+        var fstat = Fstat(filePath);
+        if (!IsInDepotFstat(fstat))
             return _fs.PrepareToWrite(filePath);
+
+        // Re-created on disk while scheduled for delete: cancel the delete first.
+        // `p4 edit` on a pending-delete file only warns (exit 0) and leaves the
+        // delete pending, so the file would still be deleted at next submit.
+        var action = PendingAction(fstat);
+        if (action is "delete" or "move/delete")
+            return ReopenAfterPendingDelete(filePath, fstat, action);
 
         var result = P4(["edit", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok();
@@ -44,13 +52,9 @@ public class PerforceProvider : IVCProvider
 
         // File has a pending delete in a changelist but was just re-written to disk.
         // Cancel the delete (keeping the new local content) then reopen for edit.
-        if (fstat.Contains("... action delete"))
-        {
-            P4(["revert", "-k", filePath]);
-            var editResult = P4(["edit", filePath]);
-            if (editResult.ExitCode == 0) return VCResult.Ok("File reopened for edit after pending delete was reverted");
-            return VCResult.Error($"Cannot reopen '{filePath}' for edit after reverting pending delete: {editResult.Error ?? editResult.Output}");
-        }
+        var action = PendingAction(fstat);
+        if (action is "delete" or "move/delete")
+            return ReopenAfterPendingDelete(filePath, fstat, action);
 
         if (IsInDepotFstat(fstat)) return VCResult.Ok();
 
@@ -64,30 +68,55 @@ public class PerforceProvider : IVCProvider
 
     public VCResult DeleteFile(string filePath)
     {
-        if (!File.Exists(filePath)) return VCResult.Ok();
+        // No early-out on a missing local file: the file may still be opened in a
+        // pending changelist (e.g. added then deleted between submits), and that
+        // stale entry would abort the eventual submit and leave it locked.
+        var fstat = Fstat(filePath);
+        var action = PendingAction(fstat);
 
-        if (IsInDepot(filePath))
+        // Open for add (never submitted): there is nothing in the depot to delete.
+        // `p4 delete` would only warn (exit 0) and leave the add pending, so
+        // revert it, then remove the local file.
+        if (action == "add")
         {
+            P4(["revert", "-k", filePath]);
+            return RemoveLocal(filePath) ?? VCResult.Ok();
+        }
+
+        // Target half of a pending rename: cancel the move (reverting the move/add
+        // half clears both ends, keeping disk files), schedule the original path
+        // for delete (p4 delete works without a local copy), and remove this one.
+        if (action == "move/add")
+        {
+            var source = MovedCounterpart(fstat);
+            P4(["revert", "-k", filePath]);
+            if (source is not null) P4(["delete", source]);
+            return RemoveLocal(filePath) ?? VCResult.Ok();
+        }
+
+        // Already scheduled for delete: just make sure the local copy is gone.
+        if (action is "delete" or "move/delete")
+            return RemoveLocal(filePath) ?? VCResult.Ok();
+
+        // Open for edit/integrate/etc: revert before scheduling the delete, since
+        // `p4 delete` refuses files that are already open (warns, exit 0).
+        if (action is not null)
+            P4(["revert", "-k", filePath]);
+
+        if (IsInDepotFstat(fstat))
+        {
+            // Remove the local copy first: `p4 delete` refuses to clobber a writable
+            // local file (e.g. right after the edit revert above), but happily
+            // schedules the delete when the local copy is already gone.
+            var localError = RemoveLocal(filePath);
+            if (localError is not null) return localError;
             var result = P4(["delete", filePath]);
             if (result.ExitCode != 0)
                 return VCResult.Error($"Cannot delete '{filePath}' from Perforce: {result.Error ?? result.Output}");
-            // p4 delete marks for deletion but leaves the file on disk as read-only.
-            // Physically remove it, consistent with git rm and svn delete.
-            if (File.Exists(filePath))
-            {
-                try
-                {
-                    new FileInfo(filePath).IsReadOnly = false;
-                    File.Delete(filePath);
-                }
-                catch (Exception ex)
-                {
-                    return VCResult.Error($"Cannot remove '{filePath}' from disk: {ex.Message}");
-                }
-            }
             return VCResult.Ok();
         }
 
+        if (!File.Exists(filePath)) return VCResult.Ok();
         return _fs.DeleteFile(filePath);
     }
 
@@ -109,15 +138,61 @@ public class PerforceProvider : IVCProvider
     public VCResult RenameFile(string oldPath, string newPath)
     {
         if (!File.Exists(oldPath)) return VCResult.Ok();
-        if (IsInDepot(oldPath))
+
+        // A pending state on the destination blocks the rename: p4 move refuses
+        // to target an opened or existing file ('can't move to an existing file',
+        // and only warns at exit 0). Clear it first.
+        var dstFstat = Fstat(newPath);
+        var dstAction = PendingAction(dstFstat);
+        if (dstAction is "add" or "move/add")
+        {
+            // The destination was created in this changelist: deleting it unwinds
+            // the pending add (and any rename pair) and removes the stale local copy.
+            var cleared = DeleteFile(newPath);
+            if (!cleared.Success) return cleared;
+        }
+        else if (dstAction is "delete" or "move/delete")
+        {
+            // The destination exists at head and is scheduled for delete; p4 move
+            // cannot target it even so. Emulate the rename: cancel the delete, carry
+            // the source content over, reopen the destination for edit, and delete
+            // the source path. (The edit must come after the file is in place —
+            // p4 edit fails trying to chmod a missing local file.)
+            P4(["revert", "-k", newPath]);
+            var staleError = RemoveLocal(newPath);
+            if (staleError is not null) return staleError;
+            var movedResult = _fs.RenameFile(oldPath, newPath);
+            if (!movedResult.Success) return movedResult;
+            var editResult = P4(["edit", newPath]);
+            if (editResult.ExitCode != 0)
+                return VCResult.Error($"Cannot rename '{oldPath}' over pending-delete '{newPath}': {editResult.Error ?? editResult.Output}");
+            return DeleteFile(oldPath);
+        }
+
+        var fstat = Fstat(oldPath);
+        if (!IsInDepotFstat(fstat)) return _fs.RenameFile(oldPath, newPath);
+
+        var action = PendingAction(fstat);
+        if (action is "delete" or "move/delete")
+        {
+            // Re-created on disk while scheduled for delete: cancel the delete so
+            // the file can be reopened and moved.
+            var reopened = ReopenAfterPendingDelete(oldPath, fstat, action);
+            if (!reopened.Success) return reopened;
+        }
+        else if (action is null)
         {
             P4(["edit", oldPath]);
-            var result = P4(["move", oldPath, newPath]);
-            var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
-            if (result.ExitCode == 0 && !combined.Contains("not opened for")) return VCResult.Ok();
-            return VCResult.Error($"Cannot rename '{oldPath}' in Perforce: {result.Error ?? result.Output}");
         }
-        return _fs.RenameFile(oldPath, newPath);
+        // Files already open for add/edit/move-add can be moved directly.
+
+        var result = P4(["move", oldPath, newPath]);
+        // p4 move reports several refusals at exit 0 ('not opened for edit',
+        // 'can't move to an existing file', 'is synced; use -f') — require the
+        // positive 'moved from' confirmation instead of blacklisting them.
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        if (result.ExitCode == 0 && combined.Contains("moved from")) return VCResult.Ok();
+        return VCResult.Error($"Cannot rename '{oldPath}' in Perforce: {result.Error ?? result.Output}");
     }
 
     public VCResult RenameFolder(string oldPath, string newPath)
@@ -154,7 +229,71 @@ public class PerforceProvider : IVCProvider
         return result.ExitCode == 0 ? result.Output : null;
     }
 
-    private static bool IsInDepot(string filePath) => IsInDepotFstat(Fstat(filePath));
+    private static readonly Regex PendingActionField = new(@"^\.\.\. action (\S+)", RegexOptions.Multiline | RegexOptions.Compiled);
+    private static readonly Regex MovedFileField = new(@"^\.\.\. movedFile (\S+)", RegexOptions.Multiline | RegexOptions.Compiled);
+
+    /// <summary>
+    /// The pending changelist action for a file ('add', 'edit', 'delete',
+    /// 'move/add', 'move/delete', ...) or null if the file is not opened.
+    /// </summary>
+    private static string? PendingAction(string? fstat)
+    {
+        if (fstat is null) return null;
+        var match = PendingActionField.Match(fstat);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    /// <summary>Depot path of the other half of a pending move, or null.</summary>
+    private static string? MovedCounterpart(string? fstat)
+    {
+        if (fstat is null) return null;
+        var match = MovedFileField.Match(fstat);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    /// <summary>
+    /// The file is scheduled for delete (or is the source of a pending rename) but
+    /// exists again on disk. Cancel the pending delete keeping the local content,
+    /// then reopen the file for edit.
+    /// <para>
+    /// p4 refuses to revert a move/delete source on its own ('has been moved, not
+    /// reverted', exit 0); reverting the move/add half clears both ends of the pair.
+    /// </para>
+    /// </summary>
+    private static VCResult ReopenAfterPendingDelete(string filePath, string? fstat, string action)
+    {
+        if (action == "move/delete")
+        {
+            var target = MovedCounterpart(fstat);
+            P4(["revert", "-k", target ?? filePath]);
+            // The renamed half is now untracked but still on disk; reopen it for add
+            // so the earlier rename isn't silently dropped from the changelist.
+            if (target is not null) P4(["add", target]);
+        }
+        else
+        {
+            P4(["revert", "-k", filePath]);
+        }
+        var editResult = P4(["edit", filePath]);
+        if (editResult.ExitCode == 0) return VCResult.Ok("File reopened for edit after pending delete was reverted");
+        return VCResult.Error($"Cannot reopen '{filePath}' for edit after reverting pending delete: {editResult.Error ?? editResult.Output}");
+    }
+
+    /// <summary>Removes the local copy if present; null on success, error result on failure.</summary>
+    private static VCResult? RemoveLocal(string filePath)
+    {
+        if (!File.Exists(filePath)) return null;
+        try
+        {
+            new FileInfo(filePath).IsReadOnly = false;
+            File.Delete(filePath);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return VCResult.Error($"Cannot remove '{filePath}' from disk: {ex.Message}");
+        }
+    }
 
     private static bool IsInDepotFstat(string? fstat)
     {

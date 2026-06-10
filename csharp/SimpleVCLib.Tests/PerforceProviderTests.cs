@@ -62,10 +62,12 @@ public class PerforceProviderTests : IDisposable
         VCLib.ClearProvider();
         if (!_available || string.IsNullOrEmpty(_testDir)) return;
 
-        // Revert all open files in the test directory.
-        P4($"revert \"{_testDir}\\...\"");
+        // Revert all open files in the test directory. p4 accepts forward
+        // slashes in local syntax on every platform (backslashes break on mac).
+        var wildcard = _testDir.Replace('\\', '/') + "/...";
+        P4($"revert \"{wildcard}\"");
         // Mark all submitted depot files under testDir for deletion.
-        var del = P4Checked($"delete \"{_testDir}\\...\"");
+        var del = P4Checked($"delete \"{wildcard}\"");
         // Submit the deletions only if p4 delete opened something.
         if (del.ExitCode == 0)
             P4("submit -d \"cleanup: remove simple-vc-lib test dir\"");
@@ -268,6 +270,261 @@ public class PerforceProviderTests : IDisposable
         var result = VCLib.DeleteFolder(dirPath);
         Assert.True(result.Success, result.Message);
         Assert.False(Directory.Exists(dirPath));
+    }
+
+    // -------------------------------------------------------------------------
+    // Repeated artifact-generation runs without a submit in between. These walk
+    // files through pending states (open for add/edit/delete) that the naive
+    // p4 commands only warn about (exit 0), silently leaving stale changelist
+    // entries that abort the eventual submit and leave it locked.
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void DeleteFile_OpenForAdd_RevertsAdd()
+    {
+        if (!_available) return;
+
+        var filePath = Path.Combine(_testDir, "cycle-add-del.txt");
+        File.WriteAllText(filePath, "run1");
+        Assert.True(VCLib.FinishedWrite(filePath).Success);
+
+        var result = VCLib.DeleteFile(filePath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(filePath));
+
+        // Nothing may stay pending: a leftover open-for-add with no local file
+        // aborts the next submit.
+        var opened = P4Checked($"opened \"{filePath}\"");
+        Assert.Contains("not opened", opened.Output + opened.Error);
+    }
+
+    [Fact]
+    public void DeleteFile_OpenForEdit_CancelsEditAndSchedulesDelete()
+    {
+        if (!_available) return;
+
+        var filePath = Path.Combine(_testDir, "cycle-edit-del.txt");
+        SubmitFile(filePath, "original");
+        Assert.True(VCLib.PrepareToWrite(filePath).Success);
+        File.WriteAllText(filePath, "rewritten");
+
+        var result = VCLib.DeleteFile(filePath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(filePath));
+
+        var fstat = P4Checked($"fstat -Od \"{filePath}\"");
+        Assert.Contains("action delete", fstat.Output);
+    }
+
+    [Fact]
+    public void DeleteFile_MissingLocalFile_CleansUpPendingState()
+    {
+        if (!_available) return;
+
+        var filePath = Path.Combine(_testDir, "cycle-phantom.txt");
+        File.WriteAllText(filePath, "run1");
+        Assert.True(VCLib.FinishedWrite(filePath).Success);
+        // Simulate an earlier run (or the tool itself) removing the file directly.
+        File.Delete(filePath);
+
+        var result = VCLib.DeleteFile(filePath);
+        Assert.True(result.Success, result.Message);
+
+        var opened = P4Checked($"opened \"{filePath}\"");
+        Assert.Contains("not opened", opened.Output + opened.Error);
+    }
+
+    [Fact]
+    public void PrepareToWrite_PendingDeleteRecreated_ReopensForEdit()
+    {
+        if (!_available) return;
+
+        var filePath = Path.Combine(_testDir, "cycle-ptw-pending-del.txt");
+        SubmitFile(filePath, "original");
+        P4($"delete \"{filePath}\"");
+        File.WriteAllText(filePath, "regenerated");
+
+        // p4 edit on a pending-delete file only warns and leaves the delete
+        // pending — the regenerated file would be deleted at next submit.
+        var result = VCLib.PrepareToWrite(filePath);
+        Assert.True(result.Success, result.Message);
+
+        var fstat = P4Checked($"fstat \"{filePath}\"");
+        Assert.Contains("action edit", fstat.Output);
+        Assert.DoesNotContain("action delete", fstat.Output);
+    }
+
+    [Fact]
+    public void RepeatedAddDeleteCycles_LeaveSubmittableChangelist()
+    {
+        if (!_available) return;
+
+        var filePath = Path.Combine(_testDir, "cycle-repeat.txt");
+        for (var run = 1; run <= 3; run++)
+        {
+            File.WriteAllText(filePath, $"run {run}");
+            Assert.True(VCLib.FinishedWrite(filePath).Success, $"FinishedWrite failed on run {run}");
+            Assert.True(VCLib.DeleteFile(filePath).Success, $"DeleteFile failed on run {run}");
+        }
+        File.WriteAllText(filePath, "final");
+        Assert.True(VCLib.FinishedWrite(filePath).Success);
+
+        var submit = P4Checked($"submit -d \"repeated cycles (simple-vc-lib test)\" \"{filePath}\"");
+        Assert.True(submit.ExitCode == 0, $"submit after repeated cycles failed:\n{submit.Output}\n{submit.Error}");
+    }
+
+    [Fact]
+    public void DeleteFile_RenameTarget_SchedulesSourceForDelete()
+    {
+        if (!_available) return;
+
+        var oldPath = Path.Combine(_testDir, "cycle-move-src.txt");
+        var newPath = Path.Combine(_testDir, "cycle-move-dst.txt");
+        SubmitFile(oldPath, "content");
+        Assert.True(VCLib.RenameFile(oldPath, newPath).Success);
+
+        var result = VCLib.DeleteFile(newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(newPath));
+
+        // Net intent: source was renamed, rename target deleted — source must end
+        // up scheduled for delete so the depot matches the disk.
+        var srcStat = P4Checked($"fstat -Od \"{oldPath}\"");
+        Assert.Contains("action delete", srcStat.Output);
+        var opened = P4Checked($"opened \"{newPath}\"");
+        Assert.Contains("not opened", opened.Output + opened.Error);
+    }
+
+    [Fact]
+    public void RenameFile_RecreatedPendingDeleteSource_CancelsDeleteAndMoves()
+    {
+        if (!_available) return;
+
+        var oldPath = Path.Combine(_testDir, "cycle-ren-pending-src.txt");
+        var newPath = Path.Combine(_testDir, "cycle-ren-pending-dst.txt");
+        SubmitFile(oldPath, "original");
+        P4($"delete \"{oldPath}\"");
+        File.WriteAllText(oldPath, "regenerated");
+
+        var result = VCLib.RenameFile(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(oldPath));
+        Assert.True(File.Exists(newPath));
+        Assert.Equal("regenerated", File.ReadAllText(newPath));
+
+        var dstStat = P4Checked($"fstat \"{newPath}\"");
+        Assert.Contains("action", dstStat.Output);
+    }
+
+    [Fact]
+    public void RenameFile_OntoPendingDeleteDestination_ReplacesIt()
+    {
+        if (!_available) return;
+
+        var oldPath = Path.Combine(_testDir, "cycle-ren-onto-src.txt");
+        var newPath = Path.Combine(_testDir, "cycle-ren-onto-dst.txt");
+        // Seed both files first: SubmitFile submits the whole default changelist,
+        // so the pending delete must be staged after the last submit.
+        SubmitFile(newPath, "old destination");
+        SubmitFile(oldPath, "source content");
+        Assert.True(VCLib.DeleteFile(newPath).Success);
+
+        // p4 move refuses a pending-delete target ('can't move to an existing
+        // file', exit 0) — the provider must emulate the rename instead of
+        // silently doing nothing.
+        var result = VCLib.RenameFile(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(oldPath));
+        Assert.True(File.Exists(newPath));
+        Assert.Equal("source content", File.ReadAllText(newPath));
+
+        var dstStat = P4Checked($"fstat \"{newPath}\"");
+        Assert.Contains("action edit", dstStat.Output);
+        var srcStat = P4Checked($"fstat -Od \"{oldPath}\"");
+        Assert.Contains("action delete", srcStat.Output);
+    }
+
+    [Fact]
+    public void RenameFile_OntoDestinationOpenForAdd_UnwindsStaleAdd()
+    {
+        if (!_available) return;
+
+        var oldPath = Path.Combine(_testDir, "cycle-ren-add-src.txt");
+        var newPath = Path.Combine(_testDir, "cycle-ren-add-dst.txt");
+        // Seed the source first: SubmitFile submits the whole default changelist,
+        // so the destination's pending add must be staged after the last submit.
+        SubmitFile(oldPath, "source content");
+        File.WriteAllText(newPath, "stale artifact");
+        Assert.True(VCLib.FinishedWrite(newPath).Success);
+
+        var result = VCLib.RenameFile(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(oldPath));
+        Assert.Equal("source content", File.ReadAllText(newPath));
+
+        var dstStat = P4Checked($"fstat \"{newPath}\"");
+        Assert.Contains("action", dstStat.Output);
+    }
+
+    [Fact]
+    public void RenameFile_OpenForAddSource_MovesPendingAdd()
+    {
+        if (!_available) return;
+
+        var oldPath = Path.Combine(_testDir, "cycle-ren-openadd-src.txt");
+        var newPath = Path.Combine(_testDir, "cycle-ren-openadd-dst.txt");
+        File.WriteAllText(oldPath, "fresh artifact");
+        Assert.True(VCLib.FinishedWrite(oldPath).Success);
+
+        var result = VCLib.RenameFile(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(oldPath));
+        Assert.True(File.Exists(newPath));
+
+        var opened = P4Checked($"opened \"{oldPath}\"");
+        Assert.Contains("not opened", opened.Output + opened.Error);
+        var dstStat = P4Checked($"fstat \"{newPath}\"");
+        Assert.Contains("action add", dstStat.Output);
+    }
+
+    [Fact]
+    public void RenameFile_OntoExistingTrackedFile_ReportsError()
+    {
+        if (!_available) return;
+
+        var oldPath = Path.Combine(_testDir, "cycle-ren-clobber-src.txt");
+        var newPath = Path.Combine(_testDir, "cycle-ren-clobber-dst.txt");
+        SubmitFile(oldPath, "source");
+        SubmitFile(newPath, "destination");
+
+        // p4 move onto an existing depot file fails with exit 0; the provider must
+        // surface that as an error instead of reporting a rename that never happened.
+        var result = VCLib.RenameFile(oldPath, newPath);
+        Assert.False(result.Success);
+        Assert.True(File.Exists(oldPath));
+        Assert.Equal("destination", File.ReadAllText(newPath));
+    }
+
+    [Fact]
+    public void FinishedWrite_RecreatedRenameSource_KeepsRenameTarget()
+    {
+        if (!_available) return;
+
+        var oldPath = Path.Combine(_testDir, "cycle-resrc-src.txt");
+        var newPath = Path.Combine(_testDir, "cycle-resrc-dst.txt");
+        SubmitFile(oldPath, "content");
+        Assert.True(VCLib.RenameFile(oldPath, newPath).Success);
+
+        // Tool regenerates an artifact at the old name in a later run.
+        File.WriteAllText(oldPath, "regenerated");
+        var result = VCLib.FinishedWrite(oldPath);
+        Assert.True(result.Success, result.Message);
+
+        var srcStat = P4Checked($"fstat \"{oldPath}\"");
+        Assert.Contains("action edit", srcStat.Output);
+        var dstStat = P4Checked($"fstat \"{newPath}\"");
+        Assert.Contains("action add", dstStat.Output);
+        Assert.True(File.Exists(newPath));
     }
 
     // -------------------------------------------------------------------------
