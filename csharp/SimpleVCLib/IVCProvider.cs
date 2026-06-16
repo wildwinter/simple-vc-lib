@@ -26,6 +26,12 @@ public interface IVCProvider
     /// </summary>
     VCResult FinishedWrite(string filePath);
 
+    /// <summary>Async twin of <see cref="PrepareToWrite"/>.</summary>
+    Task<VCResult> PrepareToWriteAsync(string filePath);
+
+    /// <summary>Async twin of <see cref="FinishedWrite"/>.</summary>
+    Task<VCResult> FinishedWriteAsync(string filePath);
+
     /// <summary>
     /// Delete a file, scheduling it for deletion in VC if tracked.
     /// </summary>
@@ -48,10 +54,31 @@ public interface IVCProvider
     /// </summary>
     VCResult RenameFolder(string oldPath, string newPath);
 
+    /// <summary>Async twin of <see cref="DeleteFile"/>.</summary>
+    Task<VCResult> DeleteFileAsync(string filePath);
+
+    /// <summary>Async twin of <see cref="DeleteFolder"/>.</summary>
+    Task<VCResult> DeleteFolderAsync(string folderPath);
+
+    /// <summary>Async twin of <see cref="RenameFile"/>.</summary>
+    Task<VCResult> RenameFileAsync(string oldPath, string newPath);
+
+    /// <summary>Async twin of <see cref="RenameFolder"/>.</summary>
+    Task<VCResult> RenameFolderAsync(string oldPath, string newPath);
+
     /// <summary>
-    /// Status for a batch of files: tracked / writable / locked-by / opened-by-me /
-    /// out-of-date, per file, in input order. Batched: one spawn per provider /
-    /// repository, not one per file.
+    /// Status for a batch of files: tracked / writable / dirty / locked-by /
+    /// opened-by-me / out-of-date, per file, in input order. Batched: one spawn per
+    /// provider / repository, not one per file.
+    /// <para>
+    /// When <paramref name="remote"/> is true, providers that need a server round-trip
+    /// for lock owners / out-of-date (SVN, Plastic) may make one; by default the read
+    /// stays local where possible. Perforce and git-LFS carry that data for free and
+    /// report it either way.
+    /// </para>
     /// </summary>
-    IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths);
+    IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths, bool remote = false);
+
+    /// <summary>Async twin of <see cref="Status"/> - spawned without blocking a thread.</summary>
+    Task<IReadOnlyList<VCFileStatus>> StatusAsync(IReadOnlyList<string> filePaths, bool remote = false);
 }

@@ -31,6 +31,7 @@ import { spawnSync } from 'child_process';
 import {
   prepareToWrite, finishedWrite, deleteFile, deleteFolder,
   renameFile, renameFolder, writeTextFile,
+  prepareToWriteAsync, finishedWriteAsync, deleteFileAsync, renameFileAsync,
   setProvider, clearProvider, PerforceProvider,
 } from '../src/index.js';
 
@@ -450,6 +451,49 @@ describe('PerforceProvider', function () {
     assert.include(srcStat.stdout, 'action edit', 'recreated source should be open for edit');
     const dstStat = p4(['fstat', newPath]);
     assert.include(dstStat.stdout, 'action add', 'rename target should be reopened for add');
+    assert.isTrue(existsSync(newPath));
+  });
+
+  // --- async twins: these exercise the mirrored async Perforce orchestration ---
+  // (the one duplicated spot — the C# side wraps sync, so this is the JS validation).
+
+  it('async: prepareToWriteAsync opens a submitted file for edit', async function () {
+    const filePath = join(testDir, 'async-ptw.txt');
+    submitFile(filePath);
+    const result = await prepareToWriteAsync(filePath);
+    assert.isTrue(result.success, result.message);
+    const fstat = p4(['fstat', filePath]);
+    assert.include(fstat.stdout, 'action edit', 'file should be open for edit');
+  });
+
+  it('async: deleteFileAsync removes a submitted file from depot', async function () {
+    const filePath = join(testDir, 'async-del.txt');
+    submitFile(filePath);
+    const result = await deleteFileAsync(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(filePath));
+    const fstat = p4(['fstat', '-Od', filePath]);
+    assert.include(fstat.stdout + fstat.stderr, 'delete', 'fstat should report open for delete');
+  });
+
+  it('async: deleteFileAsync on a file open for add reverts the add', async function () {
+    const filePath = join(testDir, 'async-del-add.txt');
+    writeFileSync(filePath, 'new');
+    assert.isTrue((await finishedWriteAsync(filePath)).success);
+    const result = await deleteFileAsync(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(filePath));
+    const opened = p4(['opened', filePath]);
+    assert.include(opened.stdout + opened.stderr, 'not opened', 'file should not remain opened');
+  });
+
+  it('async: renameFileAsync moves a submitted file via p4 move', async function () {
+    const oldPath = join(testDir, 'async-ren-src.txt');
+    const newPath = join(testDir, 'async-ren-dst.txt');
+    submitFile(oldPath, 'content');
+    const result = await renameFileAsync(oldPath, newPath);
+    assert.isTrue(result.success, result.message);
+    assert.isFalse(existsSync(oldPath));
     assert.isTrue(existsSync(newPath));
   });
 });

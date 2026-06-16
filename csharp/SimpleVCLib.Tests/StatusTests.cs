@@ -291,6 +291,72 @@ public class StatusTests : IDisposable
         Assert.Null(st.Dirty);
     }
 
+    // -- SVN remote (svn status -u): lockedBy / outOfDate ---------------------
+
+    [Fact]
+    public void SvnRemoteReportsLockedByFromServerLock()
+    {
+        var file = Path.Combine(TestHelpers.MakeTempDir(), "locked.txt");
+        VCLib.SetProvider(new SvnProvider());
+        VCLib.SetCommandRunner(CannedSvn(SvnStatusXml(
+            $"<entry path=\"{file}\">" +
+            "<wc-status item=\"normal\" props=\"normal\" revision=\"1\"><commit revision=\"1\"><author>ian</author></commit></wc-status>" +
+            "<repos-status props=\"none\" item=\"none\"><lock><token>t</token><owner>bob</owner></lock></repos-status>" +
+            "</entry>")));
+        var st = VCLib.FileStatus([file], remote: true)[0];
+        Assert.True(st.Tracked);
+        Assert.Equal(["bob"], st.LockedBy);
+        Assert.Null(st.OpenedByMe);
+    }
+
+    [Fact]
+    public void SvnRemoteFlagsOutOfDate()
+    {
+        var file = Path.Combine(TestHelpers.MakeTempDir(), "stale.txt");
+        VCLib.SetProvider(new SvnProvider());
+        VCLib.SetCommandRunner(CannedSvn(SvnStatusXml(
+            $"<entry path=\"{file}\">" +
+            "<wc-status item=\"normal\" props=\"none\" revision=\"1\"><commit revision=\"1\"><author>ian</author></commit></wc-status>" +
+            "<repos-status props=\"none\" item=\"modified\"></repos-status>" +
+            "</entry>")));
+        var st = VCLib.FileStatus([file], remote: true)[0];
+        Assert.True(st.OutOfDate);
+        Assert.Null(st.LockedBy);
+    }
+
+    [Fact]
+    public void SvnRemoteReportsOpenedByMeForOurOwnLock()
+    {
+        var file = Path.Combine(TestHelpers.MakeTempDir(), "mine.txt");
+        VCLib.SetProvider(new SvnProvider());
+        VCLib.SetCommandRunner(CannedSvn(SvnStatusXml(
+            $"<entry path=\"{file}\">" +
+            "<wc-status item=\"normal\" props=\"none\" revision=\"1\"><commit revision=\"1\"><author>ian</author></commit>" +
+            "<lock><token>t</token><owner>ian</owner></lock></wc-status>" +
+            "<repos-status props=\"none\" item=\"none\"><lock><token>t</token><owner>ian</owner></lock></repos-status>" +
+            "</entry>")));
+        var st = VCLib.FileStatus([file], remote: true)[0];
+        Assert.True(st.OpenedByMe);
+        Assert.Null(st.LockedBy);
+    }
+
+    [Fact]
+    public void SvnDefaultDoesNotRequestRemote()
+    {
+        var file = Path.Combine(TestHelpers.MakeTempDir(), "clean.txt");
+        var sawU = false;
+        VCLib.SetProvider(new SvnProvider());
+        VCLib.SetCommandRunner((command, args) =>
+        {
+            if (args.Contains("-u")) sawU = true;
+            return new CommandResult(0, SvnStatusXml(SvnEntry(file, "normal")), "");
+        });
+        var st = VCLib.FileStatus([file])[0];
+        Assert.False(sawU);
+        Assert.Null(st.LockedBy);
+        Assert.Null(st.OutOfDate);
+    }
+
     // -- Plastic (canned `cm status --machinereadable` transcripts) -----------
 
     /// <summary>A canned runner answering `cm status --machinereadable` with the given output.</summary>
@@ -345,6 +411,123 @@ public class StatusTests : IDisposable
         Assert.True(st.Dirty);
     }
 
+    // -- Plastic remote (cm fileinfo + cm whoami) -----------------------------
+
+    /// <summary>Dispatches the three cm subcommands the remote path issues.</summary>
+    private static Func<string, string[], CommandResult> CannedCmRemote(string status, string fileinfo, string whoami) =>
+        (command, args) =>
+        {
+            if (command != "cm") return new CommandResult(1, "", "not cm");
+            return args[0] switch
+            {
+                "status" => new CommandResult(0, status, ""),
+                "fileinfo" => new CommandResult(0, fileinfo, ""),
+                "whoami" => new CommandResult(0, whoami, ""),
+                _ => new CommandResult(1, "", $"unexpected: {string.Join(' ', args)}"),
+            };
+        };
+
+    [Fact]
+    public void PlasticRemoteFillsOutOfDateLockedByAndOpenedByMe()
+    {
+        var dir = TestHelpers.MakeTempDir();
+        var a = Path.Combine(dir, "a.txt");
+        var b = Path.Combine(dir, "b.txt");
+        VCLib.SetProvider(new PlasticProvider());
+        VCLib.SetCommandRunner(CannedCmRemote(
+            status: $"CH \"{a}\"\nCO \"{b}\"",
+            fileinfo: "3;7;rep@srv;bob;bob-ws;/a.txt\n7;7;rep@srv;ian;ian-ws;/b.txt",
+            whoami: "ian"));
+        var statuses = VCLib.FileStatus([a, b], remote: true);
+        Assert.True(statuses[0].OutOfDate);                 // loaded cset 3 < head 7
+        Assert.Equal(["bob@bob-ws"], statuses[0].LockedBy); // bob != me
+        Assert.Null(statuses[0].OpenedByMe);
+        Assert.True(statuses[1].OpenedByMe);                // locked by ian == me
+        Assert.Null(statuses[1].LockedBy);
+        Assert.Null(statuses[1].OutOfDate);                 // cset 7 == head 7
+    }
+
+    [Fact]
+    public void PlasticDefaultDoesNotCallFileinfo()
+    {
+        var a = Path.Combine(TestHelpers.MakeTempDir(), "a.txt");
+        var calledFileinfo = false;
+        VCLib.SetProvider(new PlasticProvider());
+        VCLib.SetCommandRunner((command, args) =>
+        {
+            if (command == "cm" && args[0] == "fileinfo") calledFileinfo = true;
+            if (command == "cm" && args[0] == "status") return new CommandResult(0, $"CH \"{a}\"", "");
+            return new CommandResult(0, "", "");
+        });
+        var st = VCLib.FileStatus([a])[0];
+        Assert.False(calledFileinfo);
+        Assert.True(st.Dirty);
+        Assert.Null(st.OutOfDate);
+        Assert.Null(st.LockedBy);
+    }
+
+    // -- FileStatusAsync (async twin) -----------------------------------------
+
+    [Fact]
+    public async Task FileStatusAsyncMatchesFileStatusForRealGitRepo()
+    {
+        var (_, tracked, untracked) = MakeGitRepo();
+        File.WriteAllText(tracked, "tracked + edit");
+        IReadOnlyList<string> paths = [tracked, untracked];
+        var sync = VCLib.FileStatus(paths);
+        var async = await VCLib.FileStatusAsync(paths);
+        Assert.Equal(sync, async);
+        Assert.True(async[0].Tracked);
+        Assert.True(async[0].Dirty);
+        Assert.False(async[1].Tracked);
+    }
+
+    [Fact]
+    public async Task FileStatusAsyncDrivesPerforceCannedRunner()
+    {
+        var clientFile = Path.Combine(TestHelpers.MakeTempDir(), "b.txt");
+        VCLib.SetProvider(new PerforceProvider());
+        VCLib.SetCommandRunner(CannedP4(Ztag([
+            "... depotFile //depot/proj/b.txt",
+            $"... clientFile {clientFile}",
+            "... headRev 3",
+            "... haveRev 3",
+            "... action edit",
+        ])));
+        var st = (await VCLib.FileStatusAsync([clientFile]))[0];
+        Assert.True(st.Tracked);
+        Assert.True(st.OpenedByMe);
+        Assert.True(st.Dirty);
+    }
+
+    [Fact]
+    public async Task FileStatusAsyncSupportsRemoteForSvn()
+    {
+        var file = Path.Combine(TestHelpers.MakeTempDir(), "locked.txt");
+        VCLib.SetProvider(new SvnProvider());
+        VCLib.SetCommandRunner(CannedSvn(SvnStatusXml(
+            $"<entry path=\"{file}\">" +
+            "<wc-status item=\"normal\" props=\"normal\" revision=\"1\"><commit revision=\"1\"><author>ian</author></commit></wc-status>" +
+            "<repos-status props=\"none\" item=\"none\"><lock><token>t</token><owner>bob</owner></lock></repos-status>" +
+            "</entry>")));
+        var st = (await VCLib.FileStatusAsync([file], remote: true))[0];
+        Assert.Equal(["bob"], st.LockedBy);
+    }
+
+    [Fact]
+    public async Task FileStatusAsyncSupportsRemoteForPlastic()
+    {
+        var a = Path.Combine(TestHelpers.MakeTempDir(), "a.txt");
+        VCLib.SetProvider(new PlasticProvider());
+        VCLib.SetCommandRunner(CannedCmRemote(
+            status: $"CH \"{a}\"",
+            fileinfo: "3;7;rep@srv;bob;bob-ws;/a.txt",
+            whoami: "ian"));
+        var st = (await VCLib.FileStatusAsync([a], remote: true))[0];
+        Assert.True(st.OutOfDate);
+        Assert.Equal(["bob@bob-ws"], st.LockedBy);
+    }
+
     // -- filesystem fallback ---------------------------------------------------
 
     [Fact]
@@ -394,6 +577,74 @@ public class StatusTests : IDisposable
         Assert.True(File.Exists(Path.Combine(dir, "free.txt")));    // the rest proceeded
     }
 
+    // -- async write path ------------------------------------------------------
+
+    [Fact]
+    public async Task WriteTextFilesAsyncWritesBatchAndReportsSuccess()
+    {
+        VCLib.SetProvider(new FilesystemProvider());
+        var dir = TestHelpers.MakeTempDir();
+        var batch = await VCLib.WriteTextFilesAsync([
+            new VCFileWrite(Path.Combine(dir, "sub", "a.txt"), "A"),
+            new VCFileWrite(Path.Combine(dir, "deeper", "b.txt"), "B"),
+        ]);
+        Assert.True(batch.Success);
+        Assert.Equal(2, batch.Results.Count);
+        Assert.Equal("A", File.ReadAllText(Path.Combine(dir, "sub", "a.txt")));
+    }
+
+    [Fact]
+    public async Task WriteTextFilesAsyncReportsRefusalAndKeepsGoing()
+    {
+        VCLib.SetProvider(new LockedFakeProvider());
+        var dir = TestHelpers.MakeTempDir();
+        var batch = await VCLib.WriteTextFilesAsync([
+            new VCFileWrite(Path.Combine(dir, "locked.txt"), "x"),
+            new VCFileWrite(Path.Combine(dir, "free.txt"), "y"),
+        ]);
+        Assert.False(batch.Success);
+        var failure = batch.Results.Single(r => !r.Success);
+        Assert.Equal(VCStatus.Locked, failure.Status);
+        Assert.False(File.Exists(Path.Combine(dir, "locked.txt")));
+        Assert.True(File.Exists(Path.Combine(dir, "free.txt")));
+    }
+
+    [Fact]
+    public async Task WriteTextFileAsyncRegistersNewFileWithRealGit()
+    {
+        var (dir, _, _) = MakeGitRepo();
+        var file = Path.Combine(dir, "fresh.txt");
+        var result = await VCLib.WriteTextFileAsync(file, "hello async");
+        Assert.True(result.Success);
+        Assert.Equal("hello async", File.ReadAllText(file));
+        VCLib.ClearProvider();
+        var st = (await VCLib.FileStatusAsync([file]))[0];
+        Assert.True(st.Tracked);
+    }
+
+    [Fact]
+    public async Task DeleteFileAsyncRemovesUntrackedFileViaFilesystem()
+    {
+        VCLib.SetProvider(new FilesystemProvider());
+        var dir = TestHelpers.MakeTempDir();
+        var file = Path.Combine(dir, "gone.txt");
+        File.WriteAllText(file, "x");
+        var result = await VCLib.DeleteFileAsync(file);
+        Assert.True(result.Success);
+        Assert.False(File.Exists(file));
+    }
+
+    [Fact]
+    public async Task RenameFileAsyncRenamesTrackedFileViaRealGit()
+    {
+        var (dir, tracked, _) = MakeGitRepo();
+        var renamed = Path.Combine(dir, "renamed.txt");
+        var result = await VCLib.RenameFileAsync(tracked, renamed);
+        Assert.True(result.Success);
+        Assert.False(File.Exists(tracked));
+        Assert.True(File.Exists(renamed));
+    }
+
     /// <summary>A provider that refuses writes to *locked.txt, for failure-path tests.</summary>
     private sealed class LockedFakeProvider : IVCProvider
     {
@@ -403,11 +654,19 @@ public class StatusTests : IDisposable
                 ? VCResult.Failure(VCStatus.Locked, "'locked.txt' is locked by bob@bob-ws")
                 : VCResult.Ok();
         public VCResult FinishedWrite(string filePath) => VCResult.Ok();
+        public Task<VCResult> PrepareToWriteAsync(string filePath) => Task.FromResult(PrepareToWrite(filePath));
+        public Task<VCResult> FinishedWriteAsync(string filePath) => Task.FromResult(FinishedWrite(filePath));
         public VCResult DeleteFile(string filePath) => VCResult.Ok();
         public VCResult DeleteFolder(string folderPath) => VCResult.Ok();
         public VCResult RenameFile(string oldPath, string newPath) => VCResult.Ok();
         public VCResult RenameFolder(string oldPath, string newPath) => VCResult.Ok();
-        public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths) =>
+        public Task<VCResult> DeleteFileAsync(string filePath) => Task.FromResult(DeleteFile(filePath));
+        public Task<VCResult> DeleteFolderAsync(string folderPath) => Task.FromResult(DeleteFolder(folderPath));
+        public Task<VCResult> RenameFileAsync(string oldPath, string newPath) => Task.FromResult(RenameFile(oldPath, newPath));
+        public Task<VCResult> RenameFolderAsync(string oldPath, string newPath) => Task.FromResult(RenameFolder(oldPath, newPath));
+        public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths, bool remote = false) =>
             filePaths.Select(p => new VCFileStatus(Path.GetFullPath(p), Name, true)).ToList();
+        public Task<IReadOnlyList<VCFileStatus>> StatusAsync(IReadOnlyList<string> filePaths, bool remote = false) =>
+            Task.FromResult(Status(filePaths, remote));
     }
 }

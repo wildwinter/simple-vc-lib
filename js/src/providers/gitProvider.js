@@ -1,6 +1,6 @@
 import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, renameSync, constants } from 'fs';
 import { dirname, resolve, basename } from 'path';
-import { runCommand } from '../commandRunner.js';
+import { runCommand, runCommandAsync } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { writableBit } from '../vcStatus.js';
 import { FilesystemProvider } from './filesystemProvider.js';
@@ -27,10 +27,18 @@ function makeWritable(filePath) {
 }
 
 function git(args, cwd, options = {}) {
+  return runCommand('git', gitArgv(args, cwd), { cwd, ...options });
+}
+
+function gitAsync(args, cwd, options = {}) {
+  return runCommandAsync('git', gitArgv(args, cwd), { cwd, ...options });
+}
+
+function gitArgv(args, cwd) {
   const isWindows = process.platform === 'win32';
   const safeCwd = isWindows ? cwd.replace(/\\/g, '/') : cwd;
   const safeArgs = isWindows ? args.map(arg => typeof arg === 'string' ? arg.replace(/\\/g, '/') : arg) : args;
-  return runCommand('git', ['-C', safeCwd, ...safeArgs], { cwd, ...options });
+  return ['-C', safeCwd, ...safeArgs];
 }
 
 /**
@@ -41,11 +49,20 @@ function isTracked(filePath) {
   return result.exitCode === 0;
 }
 
+async function isTrackedAsync(filePath) {
+  const result = await gitAsync(['ls-files', '--error-unmatch', filePath], dirname(filePath));
+  return result.exitCode === 0;
+}
+
 /**
  * Returns true if the given directory is inside a git repository.
  */
 function isInRepo(dir) {
   return git(['rev-parse', '--git-dir'], dir).exitCode === 0;
+}
+
+async function isInRepoAsync(dir) {
+  return (await gitAsync(['rev-parse', '--git-dir'], dir)).exitCode === 0;
 }
 
 /**
@@ -82,6 +99,90 @@ export class GitProvider {
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('ignored')) return fs.finishedWrite(filePath);
     return errorResult('error', `Cannot add '${filePath}' to git: ${result.error || result.output}`);
+  }
+
+  // git prepareToWrite is pure local fs (no spawn), so the async twin just wraps it.
+  prepareToWriteAsync(filePath) { return Promise.resolve(this.prepareToWrite(filePath)); }
+
+  /** Async twin of {@link finishedWrite}. */
+  async finishedWriteAsync(filePath) {
+    if (!existsSync(filePath))
+      return errorResult('error', `'${filePath}' does not exist after write`);
+    if (await isTrackedAsync(filePath)) return okResult();
+
+    const cwd = dirname(filePath);
+    if (!(await isInRepoAsync(cwd)))
+      return fs.finishedWriteAsync(filePath);
+
+    const result = await gitAsync(['add', filePath], cwd);
+    if (result.exitCode === 0) return okResult('File added to git');
+    const combined = (result.output + ' ' + result.error).toLowerCase();
+    if (combined.includes('ignored')) return fs.finishedWriteAsync(filePath);
+    return errorResult('error', `Cannot add '${filePath}' to git: ${result.error || result.output}`);
+  }
+
+  /** Async twin of {@link deleteFile}. */
+  async deleteFileAsync(filePath) {
+    if (!existsSync(filePath)) return okResult();
+    if (await isTrackedAsync(filePath)) {
+      const result = await gitAsync(['rm', '--force', filePath], dirname(filePath));
+      if (result.exitCode === 0) return okResult();
+      return errorResult('error', `Cannot delete '${filePath}' from git: ${result.error || result.output}`);
+    }
+    try {
+      unlinkSync(filePath);
+      return okResult();
+    } catch (e) {
+      return errorResult('error', `Failed to delete file: ${e.message}`);
+    }
+  }
+
+  /** Async twin of {@link deleteFolder}. */
+  async deleteFolderAsync(folderPath) {
+    if (!existsSync(folderPath)) return okResult();
+    const listResult = await gitAsync(['ls-files', folderPath], folderPath);
+    if (listResult.exitCode === 0 && listResult.output.length > 0) {
+      const rmResult = await gitAsync(['rm', '-r', '--force', folderPath], folderPath);
+      if (rmResult.exitCode !== 0)
+        return errorResult('error', `Cannot delete folder '${folderPath}' from git: ${rmResult.error || rmResult.output}`);
+    }
+    if (existsSync(folderPath)) {
+      try {
+        rmSync(folderPath, { recursive: true, force: true });
+      } catch (e) {
+        return errorResult('error', `Cannot delete folder '${folderPath}': ${e.message}`);
+      }
+    }
+    return okResult();
+  }
+
+  /** Async twin of {@link renameFile}. */
+  async renameFileAsync(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    if (await isTrackedAsync(oldPath)) {
+      const result = await gitAsync(['mv', oldPath, newPath], dirname(oldPath));
+      if (result.exitCode === 0) return okResult();
+      return errorResult('error', `Cannot rename '${oldPath}' in git: ${result.error || result.output}`);
+    }
+    try {
+      renameSync(oldPath, newPath);
+      return okResult();
+    } catch (e) {
+      return errorResult('error', `Cannot rename '${oldPath}': ${e.message}`);
+    }
+  }
+
+  /** Async twin of {@link renameFolder}. */
+  async renameFolderAsync(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    const result = await gitAsync(['mv', oldPath, newPath], dirname(oldPath));
+    if (result.exitCode === 0) return okResult();
+    try {
+      renameSync(oldPath, newPath);
+      return okResult();
+    } catch (e) {
+      return errorResult('error', `Cannot rename folder '${oldPath}': ${e.message}`);
+    }
   }
 
   deleteFile(filePath) {
@@ -166,9 +267,7 @@ export class GitProvider {
    * @returns {import('../vcStatus.js').VCFileStatus[]}
    */
   status(filePaths) {
-    // Group by repository root so one repo costs two spawns, not 2-per-file.
-    // Per directory, one `rev-parse --show-toplevel --show-prefix` yields both
-    // the canonical root and the dir's repo-relative prefix.
+    // Group by repository root (one rev-parse per unique directory, cached).
     const infoByDir = new Map();
     const groups = new Map();
     for (const filePath of filePaths) {
@@ -176,79 +275,126 @@ export class GitProvider {
       const dir = dirname(abs);
       let info = infoByDir.get(dir);
       if (info === undefined) {
-        const result = git(['rev-parse', '--show-toplevel', '--show-prefix'], dir);
-        if (result.exitCode === 0) {
-          const lines = result.output.split('\n');
-          info = { root: lines[0].trim(), prefix: (lines[1] ?? '').trim() };
-        } else {
-          info = { root: null, prefix: '' };
-        }
+        info = gitDirInfo(git(['rev-parse', '--show-toplevel', '--show-prefix'], dir));
         infoByDir.set(dir, info);
       }
-      const key = info.root ?? '(none)';
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push({ filePath, abs, relKey: info.prefix + basename(abs) });
+      addToGitGroup(groups, info, filePath, abs);
     }
 
     const byInput = new Map();
-    for (const [key, files] of groups) {
-      if (key === '(none)') {
-        // Not inside a repository - report writability only.
-        for (const { filePath, abs } of files) {
-          byInput.set(filePath, { filePath: abs, system: 'git', writable: writableBit(abs) });
-        }
-        continue;
-      }
-      const root = key;
-
-      // -z output: `XY <path>\0` entries, paths relative to the repo root.
-      // trim:false - a worktree-modified first entry begins with a space (' M ...')
-      // that trimming would strip, shifting the path and losing the dirty signal.
+    for (const [root, files] of groups) {
+      if (root === '(none)') { reportWritableOnly(files, byInput); continue; }
       const st = git(['status', '--porcelain', '-z', '--', ...files.map((f) => f.relKey)], root, { trim: false });
-      const states = new Map();
-      if (st.exitCode === 0 && st.output) {
-        for (const entry of st.output.split('\0')) {
-          if (entry.length < 4) continue;
-          states.set(entry.slice(3), entry.slice(0, 2));
-        }
-      }
-
-      // LFS locks (optional - skipped silently when lfs is absent or errors).
-      // Lock paths are repo-relative already.
-      const ours = new Set();
-      const theirs = new Map();
       const locks = git(['lfs', 'locks', '--verify', '--json'], root);
-      if (locks.exitCode === 0 && locks.output.startsWith('{')) {
-        try {
-          const parsed = JSON.parse(locks.output);
-          for (const lock of parsed.ours ?? []) ours.add(lock.path);
-          for (const lock of parsed.theirs ?? []) {
-            theirs.set(lock.path, [...(theirs.get(lock.path) ?? []), lock.owner?.name ?? 'unknown']);
-          }
-        } catch {
-          // Unparseable lock output - status is still useful without it.
-        }
-      }
+      assembleGitStatuses(files, gitStates(st), gitLocks(locks), byInput);
+    }
+    return filePaths.map((filePath) => byInput.get(filePath));
+  }
 
-      for (const { filePath, abs, relKey } of files) {
-        /** @type {import('../vcStatus.js').VCFileStatus} */
-        // Absent from porcelain output = clean & tracked; '??' = untracked;
-        // any other code (M/A/D/R/MM/...) = a tracked file with pending changes.
-        const code = states.get(relKey);
-        const status = {
-          filePath: abs,
-          system: 'git',
-          writable: writableBit(abs),
-          tracked: code !== '??',
-          dirty: code !== undefined && code !== '??',
-        };
-        if (ours.has(relKey)) status.openedByMe = true;
-        const owners = theirs.get(relKey);
-        if (owners) status.lockedBy = owners;
-        byInput.set(filePath, status);
+  /**
+   * Async twin of {@link status}. Within each repo the porcelain status and the
+   * git-lfs lock list are independent, so they run concurrently.
+   */
+  async statusAsync(filePaths) {
+    const infoByDir = new Map();
+    const groups = new Map();
+    for (const filePath of filePaths) {
+      const abs = resolve(filePath);
+      const dir = dirname(abs);
+      let info = infoByDir.get(dir);
+      if (info === undefined) {
+        info = gitDirInfo(await gitAsync(['rev-parse', '--show-toplevel', '--show-prefix'], dir));
+        infoByDir.set(dir, info);
       }
+      addToGitGroup(groups, info, filePath, abs);
     }
 
+    const byInput = new Map();
+    for (const [root, files] of groups) {
+      if (root === '(none)') { reportWritableOnly(files, byInput); continue; }
+      const [st, locks] = await Promise.all([
+        gitAsync(['status', '--porcelain', '-z', '--', ...files.map((f) => f.relKey)], root, { trim: false }),
+        gitAsync(['lfs', 'locks', '--verify', '--json'], root),
+      ]);
+      assembleGitStatuses(files, gitStates(st), gitLocks(locks), byInput);
+    }
     return filePaths.map((filePath) => byInput.get(filePath));
+  }
+}
+
+/** Parse one `rev-parse --show-toplevel --show-prefix` result into {root, prefix}. */
+function gitDirInfo(result) {
+  if (result.exitCode === 0) {
+    const lines = result.output.split('\n');
+    return { root: lines[0].trim(), prefix: (lines[1] ?? '').trim() };
+  }
+  return { root: null, prefix: '' };
+}
+
+/** Bucket a file under its repo root (or '(none)' when outside any repo). */
+function addToGitGroup(groups, info, filePath, abs) {
+  const key = info.root ?? '(none)';
+  if (!groups.has(key)) groups.set(key, []);
+  groups.get(key).push({ filePath, abs, relKey: info.prefix + basename(abs) });
+}
+
+/** Files outside any repo: report the writable bit only. */
+function reportWritableOnly(files, byInput) {
+  for (const { filePath, abs } of files) {
+    byInput.set(filePath, { filePath: abs, system: 'git', writable: writableBit(abs) });
+  }
+}
+
+/**
+ * `git status --porcelain -z` -> Map(repoRelPath -> 'XY'). `-z` entries are
+ * `XY <path>\0`; the path begins at index 3 (after the two status chars + space).
+ */
+function gitStates(st) {
+  const states = new Map();
+  if (st.exitCode === 0 && st.output) {
+    for (const entry of st.output.split('\0')) {
+      if (entry.length < 4) continue;
+      states.set(entry.slice(3), entry.slice(0, 2));
+    }
+  }
+  return states;
+}
+
+/** `git lfs locks --verify --json` -> {ours: Set, theirs: Map(path -> owners)}. */
+function gitLocks(locks) {
+  const ours = new Set();
+  const theirs = new Map();
+  if (locks.exitCode === 0 && locks.output.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(locks.output);
+      for (const lock of parsed.ours ?? []) ours.add(lock.path);
+      for (const lock of parsed.theirs ?? []) {
+        theirs.set(lock.path, [...(theirs.get(lock.path) ?? []), lock.owner?.name ?? 'unknown']);
+      }
+    } catch {
+      // Unparseable lock output - status is still useful without it.
+    }
+  }
+  return { ours, theirs };
+}
+
+/** Build per-file statuses for one repo's files from its porcelain + lock data. */
+function assembleGitStatuses(files, states, { ours, theirs }, byInput) {
+  for (const { filePath, abs, relKey } of files) {
+    // Absent from porcelain = clean & tracked; '??' = untracked; any other code
+    // (M/A/D/R/MM/...) = a tracked file with pending changes.
+    const code = states.get(relKey);
+    /** @type {import('../vcStatus.js').VCFileStatus} */
+    const status = {
+      filePath: abs,
+      system: 'git',
+      writable: writableBit(abs),
+      tracked: code !== '??',
+      dirty: code !== undefined && code !== '??',
+    };
+    if (ours.has(relKey)) status.openedByMe = true;
+    const owners = theirs.get(relKey);
+    if (owners) status.lockedBy = owners;
+    byInput.set(filePath, status);
   }
 }

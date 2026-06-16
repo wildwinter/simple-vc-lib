@@ -38,6 +38,34 @@ public class GitProvider : IVCProvider
         return VCResult.Error($"Cannot add '{filePath}' to git: {result.Error ?? result.Output}");
     }
 
+    // git PrepareToWrite is pure local fs (no spawn), so the async twin just wraps it.
+    public Task<VCResult> PrepareToWriteAsync(string filePath) => Task.FromResult(PrepareToWrite(filePath));
+
+    /// <summary>Async twin of <see cref="FinishedWrite"/>.</summary>
+    public async Task<VCResult> FinishedWriteAsync(string filePath)
+    {
+        if (!File.Exists(filePath))
+            return VCResult.Error($"'{filePath}' does not exist after write");
+        if (await IsTrackedAsync(filePath).ConfigureAwait(false)) return VCResult.Ok();
+
+        var cwd = Path.GetDirectoryName(filePath)!;
+        if (!await IsInRepoAsync(cwd).ConfigureAwait(false))
+            return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
+
+        var result = await GitAsync(["add", filePath], cwd).ConfigureAwait(false);
+        if (result.ExitCode == 0) return VCResult.Ok("File added to git");
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        if (combined.Contains("ignored")) return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
+        return VCResult.Error($"Cannot add '{filePath}' to git: {result.Error ?? result.Output}");
+    }
+
+    // Delete/rename reuse the tested sync logic on a thread-pool thread (the subprocess
+    // wait parks a pooled thread; no duplication of the orchestration).
+    public Task<VCResult> DeleteFileAsync(string filePath) => Task.Run(() => DeleteFile(filePath));
+    public Task<VCResult> DeleteFolderAsync(string folderPath) => Task.Run(() => DeleteFolder(folderPath));
+    public Task<VCResult> RenameFileAsync(string oldPath, string newPath) => Task.Run(() => RenameFile(oldPath, newPath));
+    public Task<VCResult> RenameFolderAsync(string oldPath, string newPath) => Task.Run(() => RenameFolder(oldPath, newPath));
+
     public VCResult DeleteFile(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();
@@ -107,8 +135,21 @@ public class GitProvider : IVCProvider
         return result.ExitCode == 0;
     }
 
+    private static async Task<bool> IsTrackedAsync(string filePath)
+    {
+        var cwd = Path.GetDirectoryName(filePath) ?? ".";
+        var result = await GitAsync(["ls-files", "--error-unmatch", filePath], cwd).ConfigureAwait(false);
+        return result.ExitCode == 0;
+    }
+
+    private static async Task<bool> IsInRepoAsync(string dir) =>
+        (await GitAsync(["rev-parse", "--git-dir"], dir).ConfigureAwait(false)).ExitCode == 0;
+
     private static CommandRunner.Result Git(string[] args, string cwd, bool trimOutput = true) =>
         CommandRunner.Run("git", ["-C", cwd, ..args], workingDirectory: cwd, trimOutput: trimOutput);
+
+    private static Task<CommandRunner.Result> GitAsync(string[] args, string cwd, bool trimOutput = true) =>
+        CommandRunner.RunAsync("git", ["-C", cwd, ..args], workingDirectory: cwd, trimOutput: trimOutput);
     /// <summary>
     /// Status for a batch of files: per repository root, ONE
     /// <c>git status --porcelain -z</c> (tracked-ness) plus - when git-lfs is in
@@ -122,11 +163,11 @@ public class GitProvider : IVCProvider
     /// lookup.
     /// </para>
     /// </summary>
-    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths)
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths, bool remote = false)
     {
-        // Group by repository root so one repo costs two spawns, not 2-per-file.
-        // Per directory, one `rev-parse --show-toplevel --show-prefix` yields both
-        // the canonical root and the dir's repo-relative prefix.
+        // remote is ignored: git's one status + one lfs-locks call already carry
+        // everything git can report (git itself has no server-side lock/staleness).
+        _ = remote;
         var infoByDir = new Dictionary<string, (string? Root, string Prefix)>();
         var groups = new Dictionary<string, List<(string Input, string RelKey)>>();
         foreach (var filePath in filePaths)
@@ -135,94 +176,141 @@ public class GitProvider : IVCProvider
             var dir = Path.GetDirectoryName(abs)!;
             if (!infoByDir.TryGetValue(dir, out var info))
             {
-                var result = Git(["rev-parse", "--show-toplevel", "--show-prefix"], dir);
-                if (result.ExitCode == 0)
-                {
-                    var lines = result.Output.Split('\n');
-                    info = (lines[0].Trim(), lines.Length > 1 ? lines[1].Trim() : "");
-                }
-                else
-                {
-                    info = (null, "");
-                }
+                info = GitDirInfo(Git(["rev-parse", "--show-toplevel", "--show-prefix"], dir));
                 infoByDir[dir] = info;
             }
-            var key = info.Root ?? "(none)";
-            if (!groups.TryGetValue(key, out var group))
-                groups[key] = group = new List<(string, string)>();
-            group.Add((filePath, info.Prefix + Path.GetFileName(abs)));
+            AddToGitGroup(groups, info, filePath, abs);
         }
 
         var byInput = new Dictionary<string, VCFileStatus>();
         foreach (var (key, files) in groups)
         {
-            if (key == "(none)")
-            {
-                // Not inside a repository - report writability only.
-                foreach (var (input, _) in files)
-                    byInput[input] = new VCFileStatus(Path.GetFullPath(input), "git", FileStatusHelpers.WritableBit(input));
-                continue;
-            }
-            var root = key;
+            if (key == "(none)") { ReportGitWritableOnly(files, byInput); continue; }
+            var st = Git(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], key, trimOutput: false);
+            var locks = Git(["lfs", "locks", "--verify", "--json"], key);
+            AssembleGitStatuses(files, GitStates(st), GitLocks(locks), byInput);
+        }
+        return filePaths.Select(p => byInput[p]).ToList();
+    }
 
-            // -z output: `XY <path>\0` entries, paths relative to the repo root.
-            // trimOutput:false - a worktree-modified first entry begins with a space
-            // (' M ...') that trimming would strip, shifting the path and losing dirty.
-            var st = Git(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], root, trimOutput: false);
-            var states = new Dictionary<string, string>();
-            if (st.ExitCode == 0 && st.Output.Length > 0)
+    /// <summary>
+    /// Async twin of <see cref="Status"/>. Within each repo the porcelain status and the
+    /// git-lfs lock list are independent, so they run concurrently.
+    /// </summary>
+    public async Task<IReadOnlyList<VCFileStatus>> StatusAsync(IReadOnlyList<string> filePaths, bool remote = false)
+    {
+        _ = remote;
+        var infoByDir = new Dictionary<string, (string? Root, string Prefix)>();
+        var groups = new Dictionary<string, List<(string Input, string RelKey)>>();
+        foreach (var filePath in filePaths)
+        {
+            var abs = Path.GetFullPath(filePath);
+            var dir = Path.GetDirectoryName(abs)!;
+            if (!infoByDir.TryGetValue(dir, out var info))
             {
-                foreach (var entry in st.Output.Split('\0'))
-                {
-                    if (entry.Length < 4) continue;
-                    states[entry[3..]] = entry[..2];
-                }
+                info = GitDirInfo(await GitAsync(["rev-parse", "--show-toplevel", "--show-prefix"], dir).ConfigureAwait(false));
+                infoByDir[dir] = info;
             }
-
-            // LFS locks (optional - skipped silently when lfs is absent or errors).
-            // Lock paths are repo-relative already.
-            var ours = new HashSet<string>();
-            var theirs = new Dictionary<string, List<string>>();
-            var locks = Git(["lfs", "locks", "--verify", "--json"], root);
-            if (locks.ExitCode == 0 && locks.Output.StartsWith('{'))
-            {
-                try
-                {
-                    using var parsed = JsonDocument.Parse(locks.Output);
-                    if (parsed.RootElement.TryGetProperty("ours", out var oursEl))
-                        foreach (var l in oursEl.EnumerateArray())
-                            ours.Add(l.GetProperty("path").GetString()!);
-                    if (parsed.RootElement.TryGetProperty("theirs", out var theirsEl))
-                        foreach (var l in theirsEl.EnumerateArray())
-                        {
-                            var rel = l.GetProperty("path").GetString()!;
-                            var owner = l.TryGetProperty("owner", out var o) && o.TryGetProperty("name", out var n)
-                                ? n.GetString() ?? "unknown" : "unknown";
-                            if (!theirs.TryGetValue(rel, out var list)) theirs[rel] = list = new List<string>();
-                            list.Add(owner);
-                        }
-                }
-                catch (JsonException)
-                {
-                    // Unparseable lock output - status is still useful without it.
-                }
-            }
-
-            foreach (var (input, relKey) in files)
-            {
-                // Absent from porcelain output = clean & tracked; '??' = untracked;
-                // any other code (M/A/D/R/MM/...) = a tracked file with pending changes.
-                var present = states.TryGetValue(relKey, out var xy);
-                var tracked = !present || xy != "??";
-                byInput[input] = new VCFileStatus(
-                    Path.GetFullPath(input), "git", FileStatusHelpers.WritableBit(input),
-                    Tracked: tracked,
-                    OpenedByMe: ours.Contains(relKey) ? true : null,
-                    LockedBy: theirs.TryGetValue(relKey, out var owners) ? owners : null,
-                    Dirty: present && xy != "??");
-            }
+            AddToGitGroup(groups, info, filePath, abs);
         }
 
+        var byInput = new Dictionary<string, VCFileStatus>();
+        foreach (var (key, files) in groups)
+        {
+            if (key == "(none)") { ReportGitWritableOnly(files, byInput); continue; }
+            var stTask = GitAsync(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], key, trimOutput: false);
+            var locksTask = GitAsync(["lfs", "locks", "--verify", "--json"], key);
+            await Task.WhenAll(stTask, locksTask).ConfigureAwait(false);
+            AssembleGitStatuses(files, GitStates(stTask.Result), GitLocks(locksTask.Result), byInput);
+        }
         return filePaths.Select(p => byInput[p]).ToList();
+    }
+
+    /// <summary>Parse one `rev-parse --show-toplevel --show-prefix` result into (root, prefix).</summary>
+    private static (string? Root, string Prefix) GitDirInfo(CommandRunner.Result result)
+    {
+        if (result.ExitCode != 0) return (null, "");
+        var lines = result.Output.Split('\n');
+        return (lines[0].Trim(), lines.Length > 1 ? lines[1].Trim() : "");
+    }
+
+    /// <summary>Bucket a file under its repo root (or "(none)" when outside any repo).</summary>
+    private static void AddToGitGroup(Dictionary<string, List<(string Input, string RelKey)>> groups,
+        (string? Root, string Prefix) info, string filePath, string abs)
+    {
+        var key = info.Root ?? "(none)";
+        if (!groups.TryGetValue(key, out var group)) groups[key] = group = new List<(string, string)>();
+        group.Add((filePath, info.Prefix + Path.GetFileName(abs)));
+    }
+
+    /// <summary>Files outside any repo: report the writable bit only.</summary>
+    private static void ReportGitWritableOnly(List<(string Input, string RelKey)> files, Dictionary<string, VCFileStatus> byInput)
+    {
+        foreach (var (input, _) in files)
+            byInput[input] = new VCFileStatus(Path.GetFullPath(input), "git", FileStatusHelpers.WritableBit(input));
+    }
+
+    /// <summary>`git status --porcelain -z` -> map of repoRelPath -> "XY".</summary>
+    private static Dictionary<string, string> GitStates(CommandRunner.Result st)
+    {
+        var states = new Dictionary<string, string>();
+        if (st.ExitCode == 0 && st.Output.Length > 0)
+            foreach (var entry in st.Output.Split('\0'))
+            {
+                if (entry.Length < 4) continue;
+                states[entry[3..]] = entry[..2];
+            }
+        return states;
+    }
+
+    /// <summary>`git lfs locks --verify --json` -> (ours, theirs).</summary>
+    private static (HashSet<string> Ours, Dictionary<string, List<string>> Theirs) GitLocks(CommandRunner.Result locks)
+    {
+        var ours = new HashSet<string>();
+        var theirs = new Dictionary<string, List<string>>();
+        if (locks.ExitCode == 0 && locks.Output.StartsWith('{'))
+        {
+            try
+            {
+                using var parsed = JsonDocument.Parse(locks.Output);
+                if (parsed.RootElement.TryGetProperty("ours", out var oursEl))
+                    foreach (var l in oursEl.EnumerateArray())
+                        ours.Add(l.GetProperty("path").GetString()!);
+                if (parsed.RootElement.TryGetProperty("theirs", out var theirsEl))
+                    foreach (var l in theirsEl.EnumerateArray())
+                    {
+                        var rel = l.GetProperty("path").GetString()!;
+                        var owner = l.TryGetProperty("owner", out var o) && o.TryGetProperty("name", out var n)
+                            ? n.GetString() ?? "unknown" : "unknown";
+                        if (!theirs.TryGetValue(rel, out var list)) theirs[rel] = list = new List<string>();
+                        list.Add(owner);
+                    }
+            }
+            catch (JsonException)
+            {
+                // Unparseable lock output - status is still useful without it.
+            }
+        }
+        return (ours, theirs);
+    }
+
+    /// <summary>Build per-file statuses for one repo's files from its porcelain + lock data.</summary>
+    private static void AssembleGitStatuses(List<(string Input, string RelKey)> files,
+        Dictionary<string, string> states,
+        (HashSet<string> Ours, Dictionary<string, List<string>> Theirs) locks,
+        Dictionary<string, VCFileStatus> byInput)
+    {
+        foreach (var (input, relKey) in files)
+        {
+            // Absent from porcelain = clean & tracked; '??' = untracked; any other code
+            // (M/A/D/R/MM/...) = a tracked file with pending changes.
+            var present = states.TryGetValue(relKey, out var xy);
+            byInput[input] = new VCFileStatus(
+                Path.GetFullPath(input), "git", FileStatusHelpers.WritableBit(input),
+                Tracked: !present || xy != "??",
+                OpenedByMe: locks.Ours.Contains(relKey) ? true : null,
+                LockedBy: locks.Theirs.TryGetValue(relKey, out var owners) ? owners : null,
+                Dirty: present && xy != "??");
+        }
     }
 }

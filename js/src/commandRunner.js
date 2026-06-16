@@ -1,4 +1,4 @@
-import { spawnSync } from 'child_process';
+import { spawnSync, spawn } from 'child_process';
 
 /** @type {((command: string, args: string[], options?: object) => object) | null} */
 let _overrideRunner = null;
@@ -53,4 +53,54 @@ export function runCommand(command, args, options = {}) {
     error: errText,
     timedOut: result.signal === 'SIGTERM' || result.signal === 'SIGKILL',
   };
+}
+
+/**
+ * Async twin of {@link runCommand} - same return shape, but spawned without blocking
+ * the event loop. Honours the same command-runner override (a canned runner may return
+ * a value or a Promise; both are awaited), so the test transcripts work unchanged.
+ *
+ * @param {string} command
+ * @param {string[]} args
+ * @param {object} [options]
+ * @returns {Promise<{exitCode: number, output: string, error: string, timedOut: boolean}>}
+ */
+export async function runCommandAsync(command, args, options = {}) {
+  if (_overrideRunner) {
+    const overridden = await _overrideRunner(command, args, options);
+    return { timedOut: false, ...overridden };
+  }
+
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd: options.cwd, windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, options.timeout ?? 10000);
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    child.on('error', (err) => {
+      // Failed to even launch (e.g. ENOENT) - mirror the sync path's error capture.
+      finish({ exitCode: -1, output: '', error: stderr.trim() || err.message, timedOut });
+    });
+    child.on('close', (code, signal) => {
+      finish({
+        exitCode: code ?? -1,
+        output: options.trim === false ? stdout : stdout.trim(),
+        error: stderr.trim(),
+        timedOut: timedOut || signal === 'SIGTERM' || signal === 'SIGKILL',
+      });
+    });
+  });
 }

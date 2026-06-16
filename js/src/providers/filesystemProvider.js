@@ -42,6 +42,15 @@ export class FilesystemProvider {
     return okResult();
   }
 
+  // Filesystem operations are local and synchronous; the async twins exist only so
+  // callers can treat every provider uniformly. They do no real awaiting.
+  prepareToWriteAsync(filePath) { return Promise.resolve(this.prepareToWrite(filePath)); }
+  finishedWriteAsync(filePath) { return Promise.resolve(this.finishedWrite(filePath)); }
+  deleteFileAsync(filePath) { return Promise.resolve(this.deleteFile(filePath)); }
+  deleteFolderAsync(folderPath) { return Promise.resolve(this.deleteFolder(folderPath)); }
+  renameFileAsync(oldPath, newPath) { return Promise.resolve(this.renameFile(oldPath, newPath)); }
+  renameFolderAsync(oldPath, newPath) { return Promise.resolve(this.renameFolder(oldPath, newPath)); }
+
   deleteFile(filePath) {
     if (!existsSync(filePath)) return okResult();
     try {
@@ -93,6 +102,11 @@ export class FilesystemProvider {
       const abs = resolve(filePath);
       return { filePath: abs, system: 'filesystem', writable: writableBit(abs) };
     });
+  }
+
+  /** Async twin of {@link status}. No commands to spawn - resolves immediately. */
+  statusAsync(filePaths) {
+    return Promise.resolve(this.status(filePaths));
   }
 }
 

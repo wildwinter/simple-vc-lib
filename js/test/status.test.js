@@ -5,7 +5,8 @@ import { join } from 'path';
 import { spawnSync } from 'child_process';
 
 import {
-  fileStatus, writeTextFiles,
+  fileStatus, fileStatusAsync, writeTextFiles, writeTextFileAsync, writeTextFilesAsync,
+  deleteFileAsync, renameFileAsync,
   setProvider, clearProvider,
   setCommandRunner, clearCommandRunner,
   FilesystemProvider, PerforceProvider, SvnProvider, PlasticProvider,
@@ -263,6 +264,58 @@ describe('fileStatus (svn, canned status xml)', () => {
     fileStatus(['/ws/wc/a.txt', '/ws/wc/b.txt', '/ws/wc/c.txt']);
     assert.equal(calls, 1);
   });
+
+  // --- remote (svn status -u): lockedBy / outOfDate. XML shapes mirror a real run. ---
+
+  it('with { remote: true } reports lockedBy from a server lock held by someone else', () => {
+    setCommandRunner(cannedSvn(statusXml(
+      '<entry path="/ws/wc/locked.txt">' +
+      '<wc-status item="normal" props="normal" revision="1"><commit revision="1"><author>ian</author></commit></wc-status>' +
+      '<repos-status props="none" item="none"><lock><token>t</token><owner>bob</owner><comment>x</comment></lock></repos-status>' +
+      '</entry>',
+    )));
+    const [st] = fileStatus(['/ws/wc/locked.txt'], { remote: true });
+    assert.isTrue(st.tracked);
+    assert.deepEqual(st.lockedBy, ['bob']);
+    assert.isUndefined(st.openedByMe);
+  });
+
+  it('with { remote: true } flags out-of-date from repos-status item != none', () => {
+    setCommandRunner(cannedSvn(statusXml(
+      '<entry path="/ws/wc/stale.txt">' +
+      '<wc-status item="normal" props="none" revision="1"><commit revision="1"><author>ian</author></commit></wc-status>' +
+      '<repos-status props="none" item="modified"></repos-status>' +
+      '</entry>',
+    )));
+    const [st] = fileStatus(['/ws/wc/stale.txt'], { remote: true });
+    assert.isTrue(st.outOfDate);
+    assert.isUndefined(st.lockedBy);
+  });
+
+  it('with { remote: true } a lock we hold reports openedByMe, not lockedBy', () => {
+    setCommandRunner(cannedSvn(statusXml(
+      '<entry path="/ws/wc/mine.txt">' +
+      '<wc-status item="normal" props="none" revision="1"><commit revision="1"><author>ian</author></commit>' +
+      '<lock><token>t</token><owner>ian</owner></lock></wc-status>' +
+      '<repos-status props="none" item="none"><lock><token>t</token><owner>ian</owner></lock></repos-status>' +
+      '</entry>',
+    )));
+    const [st] = fileStatus(['/ws/wc/mine.txt'], { remote: true });
+    assert.isTrue(st.openedByMe);
+    assert.isUndefined(st.lockedBy);
+  });
+
+  it('default (local) does not pass -u and leaves lockedBy/outOfDate undefined', () => {
+    let sawU = false;
+    setCommandRunner((command, args) => {
+      if (args.includes('-u')) sawU = true;
+      return { exitCode: 0, output: statusXml(entry('/ws/wc/clean.txt', 'normal')), error: '' };
+    });
+    const [st] = fileStatus(['/ws/wc/clean.txt']);
+    assert.isFalse(sawU);
+    assert.isUndefined(st.lockedBy);
+    assert.isUndefined(st.outOfDate);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -322,6 +375,48 @@ describe('fileStatus (plastic, canned machinereadable)', () => {
     fileStatus(['/ws/wc/a.txt', '/ws/wc/b.txt']);
     assert.equal(calls, 1);
   });
+
+  // --- remote (cm fileinfo + cm whoami): lockedBy / openedByMe / outOfDate ---
+
+  // Dispatches the three cm subcommands the remote path issues.
+  const cannedCmRemote = ({ status = '', fileinfo = '', whoami = '' }) => (command, args) => {
+    if (command !== 'cm') return { exitCode: 1, output: '', error: 'not cm' };
+    if (args[0] === 'status') return { exitCode: 0, output: status, error: '' };
+    if (args[0] === 'fileinfo') return { exitCode: 0, output: fileinfo, error: '' };
+    if (args[0] === 'whoami') return { exitCode: 0, output: whoami, error: '' };
+    return { exitCode: 1, output: '', error: `unexpected: ${args.join(' ')}` };
+  };
+
+  it('with { remote: true } fills outOfDate + lockedBy (other) and openedByMe (self)', () => {
+    setCommandRunner(cannedCmRemote({
+      // Both checked out, so both are controlled and get a fileinfo line, in input order.
+      status: 'CH "/ws/wc/a.txt"\nCO "/ws/wc/b.txt"',
+      fileinfo: '3;7;rep@srv;bob;bob-ws;/a.txt\n7;7;rep@srv;ian;ian-ws;/b.txt',
+      whoami: 'ian',
+    }));
+    const [a, b] = fileStatus(['/ws/wc/a.txt', '/ws/wc/b.txt'], { remote: true });
+    assert.isTrue(a.tracked);
+    assert.isTrue(a.outOfDate);                 // loaded cset 3 < head 7
+    assert.deepEqual(a.lockedBy, ['bob@bob-ws']); // bob != me
+    assert.isUndefined(a.openedByMe);
+    assert.isTrue(b.openedByMe);                 // locked by ian == me
+    assert.isUndefined(b.lockedBy);
+    assert.isUndefined(b.outOfDate);            // cset 7 == head 7
+  });
+
+  it('default (local) does not call fileinfo', () => {
+    let calledFileinfo = false;
+    setCommandRunner((command, args) => {
+      if (command === 'cm' && args[0] === 'fileinfo') calledFileinfo = true;
+      if (command === 'cm' && args[0] === 'status') return { exitCode: 0, output: 'CH "/ws/wc/a.txt"', error: '' };
+      return { exitCode: 0, output: '', error: '' };
+    });
+    const [st] = fileStatus(['/ws/wc/a.txt']);
+    assert.isFalse(calledFileinfo);
+    assert.isTrue(st.dirty);
+    assert.isUndefined(st.outOfDate);
+    assert.isUndefined(st.lockedBy);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -339,6 +434,72 @@ describe('fileStatus (filesystem fallback)', () => {
     assert.isTrue(st.writable);
     assert.isUndefined(st.tracked);
     assert.isTrue(missing.writable); // not on disk yet - nothing forbids writing it
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fileStatusAsync — async twin (same results, non-blocking, concurrent providers)
+// ---------------------------------------------------------------------------
+
+describe('fileStatusAsync', () => {
+  it('matches fileStatus for a real git repo (tracked / dirty / untracked)', async () => {
+    const dir = makeTempDir();
+    initGitRepo(dir);
+    writeFileSync(join(dir, 'tracked.txt'), 'tracked + edit');
+    const paths = [join(dir, 'tracked.txt'), join(dir, 'untracked.txt')];
+    const sync = fileStatus(paths);
+    const async = await fileStatusAsync(paths);
+    assert.deepEqual(async, sync);
+    assert.isTrue(async[0].tracked);
+    assert.isTrue(async[0].dirty);
+    assert.isFalse(async[1].tracked);
+  });
+
+  it('drives the Perforce canned runner through the async path', async () => {
+    setProvider(new PerforceProvider());
+    setCommandRunner(cannedP4(ztag([[
+      '... depotFile //depot/proj/b.txt',
+      '... clientFile /ws/proj/b.txt',
+      '... headRev 3',
+      '... haveRev 3',
+      '... action edit',
+    ]])));
+    const [st] = await fileStatusAsync(['/ws/proj/b.txt']);
+    assert.isTrue(st.tracked);
+    assert.isTrue(st.openedByMe);
+    assert.isTrue(st.dirty);
+  });
+
+  it('supports { remote: true } for SVN (lockedBy) through the async path', async () => {
+    setProvider(new SvnProvider());
+    setCommandRunner((command, args) =>
+      command === 'svn' && args.includes('--xml')
+        ? {
+          exitCode: 0,
+          error: '',
+          output: '<?xml version="1.0"?>\n<status>\n<target path="/ws/wc">\n' +
+            '<entry path="/ws/wc/locked.txt">' +
+            '<wc-status item="normal" props="normal" revision="1"><commit revision="1"><author>ian</author></commit></wc-status>' +
+            '<repos-status props="none" item="none"><lock><token>t</token><owner>bob</owner></lock></repos-status>' +
+            '</entry>\n</target>\n</status>',
+        }
+        : { exitCode: 1, output: '', error: 'no' });
+    const [st] = await fileStatusAsync(['/ws/wc/locked.txt'], { remote: true });
+    assert.deepEqual(st.lockedBy, ['bob']);
+  });
+
+  it('supports { remote: true } for Plastic (fileinfo) through the async path', async () => {
+    setProvider(new PlasticProvider());
+    setCommandRunner((command, args) => {
+      if (command !== 'cm') return { exitCode: 1, output: '', error: 'no' };
+      if (args[0] === 'status') return { exitCode: 0, output: 'CH "/ws/wc/a.txt"', error: '' };
+      if (args[0] === 'fileinfo') return { exitCode: 0, output: '3;7;rep@srv;bob;bob-ws;/a.txt', error: '' };
+      if (args[0] === 'whoami') return { exitCode: 0, output: 'ian', error: '' };
+      return { exitCode: 1, output: '', error: 'unexpected' };
+    });
+    const [st] = await fileStatusAsync(['/ws/wc/a.txt'], { remote: true });
+    assert.isTrue(st.outOfDate);
+    assert.deepEqual(st.lockedBy, ['bob@bob-ws']);
   });
 });
 
@@ -379,5 +540,85 @@ describe('writeTextFiles', () => {
     assert.include(failure.message, 'locked by bob@bob-ws');
     assert.isFalse(existsSync(join(dir, 'locked.txt'))); // refused write not forced
     assert.isTrue(existsSync(join(dir, 'free.txt')));    // the rest proceeded
+  });
+});
+
+// ---------------------------------------------------------------------------
+// async write path — writeTextFileAsync / writeTextFilesAsync
+// ---------------------------------------------------------------------------
+
+describe('async write path', () => {
+  it('writeTextFilesAsync writes a batch and reports per-file success', async () => {
+    setProvider(new FilesystemProvider());
+    const dir = makeTempDir();
+    const batch = await writeTextFilesAsync([
+      { filePath: join(dir, 'sub', 'a.txt'), content: 'A' },
+      { filePath: join(dir, 'deeper', 'b.txt'), content: 'B' },
+    ]);
+    assert.isTrue(batch.success);
+    assert.lengthOf(batch.results, 2);
+    assert.equal(readFileSync(join(dir, 'sub', 'a.txt'), 'utf8'), 'A');
+  });
+
+  it('writeTextFilesAsync reports a refusal with its why and keeps going', async () => {
+    const locked = {
+      name: 'git',
+      prepareToWriteAsync: async (p) => p.endsWith('locked.txt')
+        ? { success: false, status: 'locked', message: "'locked.txt' is locked by bob@bob-ws" }
+        : { success: true, status: 'ok', message: '' },
+      finishedWriteAsync: async () => ({ success: true, status: 'ok', message: '' }),
+    };
+    setProvider(locked);
+    const dir = makeTempDir();
+    const batch = await writeTextFilesAsync([
+      { filePath: join(dir, 'locked.txt'), content: 'x' },
+      { filePath: join(dir, 'free.txt'), content: 'y' },
+    ]);
+    assert.isFalse(batch.success);
+    const failure = batch.results.find((r) => !r.success);
+    assert.equal(failure.status, 'locked');
+    assert.include(failure.message, 'locked by bob@bob-ws');
+    assert.isFalse(existsSync(join(dir, 'locked.txt')));
+    assert.isTrue(existsSync(join(dir, 'free.txt')));
+  });
+
+  it('writeTextFileAsync registers a new file with real git (finishedWriteAsync)', async () => {
+    const dir = makeTempDir();
+    initGitRepo(dir);
+    const file = join(dir, 'fresh.txt');
+    const result = await writeTextFileAsync(file, 'hello async');
+    assert.isTrue(result.success);
+    assert.equal(readFileSync(file, 'utf8'), 'hello async');
+    // finishedWriteAsync should have staged it: fileStatus now sees it tracked.
+    clearProvider();
+    const [st] = await fileStatusAsync([file]);
+    assert.isTrue(st.tracked);
+  });
+
+  it('deleteFileAsync removes an untracked file via the filesystem provider', async () => {
+    setProvider(new FilesystemProvider());
+    const dir = makeTempDir();
+    const file = join(dir, 'gone.txt');
+    writeFileSync(file, 'x');
+    const result = await deleteFileAsync(file);
+    assert.isTrue(result.success);
+    assert.isFalse(existsSync(file));
+  });
+
+  it('renameFileAsync renames a tracked file via real git mv', async () => {
+    const dir = makeTempDir();
+    initGitRepo(dir);
+    const result = await renameFileAsync(join(dir, 'tracked.txt'), join(dir, 'renamed.txt'));
+    assert.isTrue(result.success);
+    assert.isFalse(existsSync(join(dir, 'tracked.txt')));
+    assert.isTrue(existsSync(join(dir, 'renamed.txt')));
+  });
+
+  it('deleteFileAsync removes and unstages a tracked file via real git', async () => {
+    const dir = makeTempDir();
+    initGitRepo(dir);
+    const result = await deleteFileAsync(join(dir, 'tracked.txt'));
+    assert.isTrue(result.success);
+    assert.isFalse(existsSync(join(dir, 'tracked.txt')));
   });
 });

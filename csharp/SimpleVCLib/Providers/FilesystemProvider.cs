@@ -34,6 +34,15 @@ public class FilesystemProvider : IVCProvider
         return VCResult.Ok();
     }
 
+    // Filesystem operations are local and synchronous; the async twins exist only so
+    // callers can treat every provider uniformly. They do no real awaiting.
+    public Task<VCResult> PrepareToWriteAsync(string filePath) => Task.FromResult(PrepareToWrite(filePath));
+    public Task<VCResult> FinishedWriteAsync(string filePath) => Task.FromResult(FinishedWrite(filePath));
+    public Task<VCResult> DeleteFileAsync(string filePath) => Task.FromResult(DeleteFile(filePath));
+    public Task<VCResult> DeleteFolderAsync(string folderPath) => Task.FromResult(DeleteFolder(folderPath));
+    public Task<VCResult> RenameFileAsync(string oldPath, string newPath) => Task.FromResult(RenameFile(oldPath, newPath));
+    public Task<VCResult> RenameFolderAsync(string oldPath, string newPath) => Task.FromResult(RenameFolder(oldPath, newPath));
+
     public VCResult DeleteFile(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();
@@ -92,7 +101,11 @@ public class FilesystemProvider : IVCProvider
     /// <summary>
     /// Status for a batch of files. No VCS: just the writable bit.
     /// </summary>
-    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths) =>
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths, bool remote = false) =>
         filePaths.Select(p => new VCFileStatus(
             Path.GetFullPath(p), "filesystem", FileStatusHelpers.WritableBit(p))).ToList();
+
+    /// <summary>Async twin of <see cref="Status"/>. No commands to spawn - completes immediately.</summary>
+    public Task<IReadOnlyList<VCFileStatus>> StatusAsync(IReadOnlyList<string> filePaths, bool remote = false) =>
+        Task.FromResult(Status(filePaths, remote));
 }

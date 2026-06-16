@@ -72,6 +72,22 @@ public static class VCLib
     public static VCResult RenameFolder(string oldPath, string newPath) =>
         GetProvider(oldPath).RenameFolder(oldPath, newPath);
 
+    /// <inheritdoc cref="IVCProvider.DeleteFileAsync"/>
+    public static Task<VCResult> DeleteFileAsync(string filePath) =>
+        GetProvider(filePath).DeleteFileAsync(filePath);
+
+    /// <inheritdoc cref="IVCProvider.DeleteFolderAsync"/>
+    public static Task<VCResult> DeleteFolderAsync(string folderPath) =>
+        GetProvider(folderPath).DeleteFolderAsync(folderPath);
+
+    /// <inheritdoc cref="IVCProvider.RenameFileAsync"/>
+    public static Task<VCResult> RenameFileAsync(string oldPath, string newPath) =>
+        GetProvider(oldPath).RenameFileAsync(oldPath, newPath);
+
+    /// <inheritdoc cref="IVCProvider.RenameFolderAsync"/>
+    public static Task<VCResult> RenameFolderAsync(string oldPath, string newPath) =>
+        GetProvider(oldPath).RenameFolderAsync(oldPath, newPath);
+
     /// <summary>
     /// Write text to a file, handling VC checkout and registration automatically.
     /// Calls <see cref="PrepareToWrite"/>, writes the file, then calls <see cref="FinishedWrite"/>.
@@ -183,16 +199,109 @@ public static class VCLib
         return new VCWriteBatchResult(results.All(r => r.Success), results);
     }
 
+    /// <inheritdoc cref="IVCProvider.PrepareToWriteAsync"/>
+    public static Task<VCResult> PrepareToWriteAsync(string filePath) =>
+        GetProvider(filePath).PrepareToWriteAsync(filePath);
+
+    /// <inheritdoc cref="IVCProvider.FinishedWriteAsync"/>
+    public static Task<VCResult> FinishedWriteAsync(string filePath) =>
+        GetProvider(filePath).FinishedWriteAsync(filePath);
+
+    /// <summary>Async twin of <see cref="WriteTextFile"/>.</summary>
+    public static async Task<VCResult> WriteTextFileAsync(
+        string filePath, string content, Encoding? encoding = null, bool forceWrite = false)
+    {
+        var enc = encoding ?? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        if (!forceWrite && File.Exists(filePath))
+        {
+            try
+            {
+                var existing = await File.ReadAllTextAsync(filePath, enc).ConfigureAwait(false);
+                if (existing == content) return VCResult.Ok();
+            }
+            catch { /* unreadable - fall through to the normal write path */ }
+        }
+        var prep = await GetProvider(filePath).PrepareToWriteAsync(filePath).ConfigureAwait(false);
+        if (!prep.Success) return prep;
+        try
+        {
+            await File.WriteAllTextAsync(filePath, content, enc).ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            return VCResult.Error(e.Message);
+        }
+        return await GetProvider(filePath).FinishedWriteAsync(filePath).ConfigureAwait(false);
+    }
+
+    /// <summary>Async twin of <see cref="WriteBinaryFile"/>.</summary>
+    public static async Task<VCResult> WriteBinaryFileAsync(string filePath, byte[] data, bool forceWrite = false)
+    {
+        if (!forceWrite && File.Exists(filePath))
+        {
+            try
+            {
+                var existing = await File.ReadAllBytesAsync(filePath).ConfigureAwait(false);
+                if (existing.SequenceEqual(data)) return VCResult.Ok();
+            }
+            catch { /* unreadable - fall through to the normal write path */ }
+        }
+        var prep = await GetProvider(filePath).PrepareToWriteAsync(filePath).ConfigureAwait(false);
+        if (!prep.Success) return prep;
+        try
+        {
+            await File.WriteAllBytesAsync(filePath, data).ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            return VCResult.Error(e.Message);
+        }
+        return await GetProvider(filePath).FinishedWriteAsync(filePath).ConfigureAwait(false);
+    }
+
     /// <summary>
-    /// Status for a batch of files: tracked / writable / locked-by / opened-by-me /
-    /// out-of-date, per file, in input order. Paths are grouped by provider so a
-    /// whole project costs a spawn or two, not one per file (Perforce: ONE
-    /// <c>p4 -ztag fstat</c>; git: one <c>git status</c> + one
+    /// Async twin of <see cref="WriteTextFiles"/>. Files are processed sequentially - VC
+    /// checkout commands on one workspace are not safe to run concurrently - so behaviour
+    /// matches the sync version exactly.
+    /// </summary>
+    public static async Task<VCWriteBatchResult> WriteTextFilesAsync(
+        IReadOnlyList<VCFileWrite> files, Encoding? encoding = null)
+    {
+        var results = new List<VCWriteOutcome>();
+        foreach (var file in files)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(file.FilePath));
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            }
+            catch (Exception e)
+            {
+                results.Add(new VCWriteOutcome(file.FilePath, false, VCStatus.Error, e.Message));
+                continue;
+            }
+            var result = await WriteTextFileAsync(file.FilePath, file.Content, encoding).ConfigureAwait(false);
+            results.Add(new VCWriteOutcome(file.FilePath, result.Success, result.Status, result.Message));
+        }
+        return new VCWriteBatchResult(results.All(r => r.Success), results);
+    }
+
+    /// <summary>
+    /// Status for a batch of files: tracked / writable / dirty / locked-by /
+    /// opened-by-me / out-of-date, per file, in input order. Paths are grouped by
+    /// provider so a whole project costs a spawn or two, not one per file (Perforce:
+    /// ONE <c>p4 -ztag fstat</c>; git: one <c>git status</c> + one
     /// <c>git lfs locks</c> per repository). The writable bit is always reported -
     /// in lock-based workflows it is the cheap local signal for "is this editable
     /// right now?".
+    /// <para>
+    /// By default the read stays as local as each provider allows. Pass
+    /// <paramref name="remote"/> = true to also fetch server-side <c>lockedBy</c> /
+    /// <c>outOfDate</c> for SVN (<c>svn status -u</c>) and Plastic (<c>cm fileinfo</c>) -
+    /// an extra round-trip. Perforce and git-LFS report that data either way.
+    /// </para>
     /// </summary>
-    public static IReadOnlyList<VCFileStatus> FileStatus(IReadOnlyList<string> filePaths)
+    public static IReadOnlyList<VCFileStatus> FileStatus(IReadOnlyList<string> filePaths, bool remote = false)
     {
         var groups = new Dictionary<string, (IVCProvider Provider, List<string> Paths)>();
         foreach (var filePath in filePaths)
@@ -206,9 +315,36 @@ public static class VCLib
         var byInput = new Dictionary<string, VCFileStatus>();
         foreach (var (provider, paths) in groups.Values)
         {
-            var statuses = provider.Status(paths);
+            var statuses = provider.Status(paths, remote);
             for (var i = 0; i < paths.Count; i++) byInput[paths[i]] = statuses[i];
         }
+        return filePaths.Select(p => byInput[p]).ToList();
+    }
+
+    /// <summary>
+    /// Async twin of <see cref="FileStatus"/>. Spawns without blocking a thread, and -
+    /// because providers are independent - runs the per-provider reads concurrently, so a
+    /// project spanning several repos/working copies finishes in about the time of its
+    /// slowest provider rather than their sum.
+    /// </summary>
+    public static async Task<IReadOnlyList<VCFileStatus>> FileStatusAsync(
+        IReadOnlyList<string> filePaths, bool remote = false)
+    {
+        var groups = new Dictionary<string, (IVCProvider Provider, List<string> Paths)>();
+        foreach (var filePath in filePaths)
+        {
+            var provider = GetProvider(filePath);
+            if (!groups.TryGetValue(provider.Name, out var group))
+                groups[provider.Name] = group = (provider, new List<string>());
+            group.Paths.Add(filePath);
+        }
+
+        var byInput = new System.Collections.Concurrent.ConcurrentDictionary<string, VCFileStatus>();
+        await Task.WhenAll(groups.Values.Select(async g =>
+        {
+            var statuses = await g.Provider.StatusAsync(g.Paths, remote).ConfigureAwait(false);
+            for (var i = 0; i < g.Paths.Count; i++) byInput[g.Paths[i]] = statuses[i];
+        })).ConfigureAwait(false);
         return filePaths.Select(p => byInput[p]).ToList();
     }
 }

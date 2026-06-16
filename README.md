@@ -178,14 +178,30 @@ Each result has:
 | `outOfDate` | `bool?` | A newer revision exists on the server |
 | `dirty` | `bool?` | Has pending local VC changes — a tracked file that is modified / staged / opened / added / deleted but not yet committed. Untracked files are not dirty (they surface via `tracked: false`). The cheap, local notion: it does not detect a file edited outside VC (e.g. a Perforce file made writable and changed without being opened). Absent when the provider can't say |
 
+**Local by default, server reads opt-in.** `fileStatus` accepts a `remote` option:
+
+```js
+fileStatus(paths);                  // local where possible (fast)
+fileStatus(paths, { remote: true }); // also fetch server lockedBy / outOfDate
+```
+
+```csharp
+VCLib.FileStatus(paths);                // local where possible
+VCLib.FileStatus(paths, remote: true);  // also fetch server lockedBy / outOfDate
+```
+
+`lockedBy` and `outOfDate` need a server round-trip for SVN and Plastic, so they are
+only fetched when `remote: true`. Perforce and git-LFS already carry that data in the
+one call they must make, so they report it either way (the flag is a no-op for them).
+
 **Calls are batched** — paths are grouped by provider and repository, so a whole project's worth of files costs a spawn or two, not one per file:
 
 | System | How | Depth |
 |---|---|---|
-| **Perforce** | ONE `p4 -ztag fstat` for the whole batch | Full: tracked, dirty (opened in a changelist), checkout/lock owners, out-of-date |
+| **Perforce** | ONE `p4 -ztag fstat` for the whole batch | Full, always: tracked, dirty (opened in a changelist), checkout/lock owners, out-of-date |
 | **Git** | One `git status --porcelain -z` + one `git lfs locks --verify --json` per repository | Full: tracked, dirty, plus lock ownership when git-lfs locking is in use (git itself has no locks) |
-| **Plastic SCM** | ONE `cm status --machinereadable --all --ignored` for the whole batch | Tracked + dirty; lock owners and out-of-date still TODO |
-| **SVN** | ONE `svn status --xml -v` for the whole batch | Tracked + dirty; lock owners and out-of-date (`svn status -u`) still TODO. The writable bit still reflects `svn:needs-lock` workflows |
+| **Plastic SCM** | ONE `cm status --machinereadable --all --ignored`; with `remote`, plus ONE `cm fileinfo` + `cm whoami` | Local: tracked, dirty. Remote: lockedBy / openedByMe / outOfDate |
+| **SVN** | ONE `svn status --xml -v`; with `remote`, adds `-u` | Local: tracked, dirty. Remote: lockedBy / openedByMe / outOfDate. The writable bit still reflects `svn:needs-lock` workflows |
 | **Filesystem** | — | Writable bit only |
 
 Path matching is done on repo-relative paths internally, so symlinked locations (such as macOS `/var` → `/private/var` temp directories) report correctly.
@@ -202,6 +218,27 @@ All operations return a result object with three fields:
 `locked` and `outOfDate` are only produced by `prepareToWrite`, for VC systems that support exclusive locking or require syncing before editing.
 
 Two exceptions to the single-result shape: `writeTextFiles` returns `{ success, results }` with one such outcome per file (plus its `filePath`), and `fileStatus` returns the status records described under [Status Reads](#status-reads).
+
+### Async API
+Every operation has an async twin with the same name plus `Async`, returning a `Promise` (JS) / `Task` (C#) — so a slow VC command (a Perforce server round-trip, a heavy `cm` startup) never blocks the calling thread:
+
+```js
+import { fileStatusAsync, writeTextFileAsync, deleteFileAsync } from 'simple-vc-lib';
+const statuses = await fileStatusAsync(paths, { remote: true });
+await writeTextFileAsync(path, content);
+```
+
+```csharp
+var statuses = await VCLib.FileStatusAsync(paths, remote: true);
+await VCLib.WriteTextFileAsync(path, content);
+```
+
+The full set: `fileStatusAsync`, `prepareToWriteAsync`, `finishedWriteAsync`, `writeTextFileAsync`, `writeBinaryFileAsync`, `writeTextFilesAsync`, `deleteFileAsync`, `deleteFolderAsync`, `renameFileAsync`, `renameFolderAsync`.
+
+Notes:
+- **`fileStatusAsync` runs providers concurrently** — a project spanning several repos/working copies finishes in about the time of its slowest provider, not the sum.
+- **Reads, writes, and (in JS) every operation use real non-blocking subprocess I/O.** In C#, the delete/rename twins reuse the tested sync logic on a thread-pool thread (`Task.Run`) rather than duplicating Perforce's intricate changelist handling — the subprocess wait parks a pooled thread.
+- **`writeTextFilesAsync` is sequential**, matching the sync version (VC checkout commands on one workspace aren't safe to run concurrently).
 
 ### VC Detection
 The library detects the active VC system automatically, in this order:

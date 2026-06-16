@@ -76,4 +76,59 @@ internal static class CommandRunner
             return new Result(-1, "", ex.Message);
         }
     }
+
+    /// <summary>
+    /// Async twin of <see cref="Run"/> - same result, awaited without blocking a thread.
+    /// Uses ConfigureAwait(false) throughout so the sync wrappers that bridge to it cannot
+    /// deadlock on a caller's synchronization context.
+    /// </summary>
+    internal static async Task<Result> RunAsync(string command, string[] args, int timeoutMs = 10000,
+                                                string? workingDirectory = null, bool trimOutput = true)
+    {
+        if (_override is not null)
+        {
+            var canned = _override(command, args);
+            return new Result(canned.ExitCode, canned.Output, canned.Error);
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = command,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = workingDirectory ?? "",
+        };
+        foreach (var arg in args)
+            psi.ArgumentList.Add(arg);
+
+        try
+        {
+            using var process = Process.Start(psi)
+                ?? throw new InvalidOperationException($"Failed to start process: {command}");
+
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
+
+            using var cts = new CancellationTokenSource(timeoutMs);
+            try
+            {
+                await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                process.Kill(entireProcessTree: true);
+                return new Result(-1, "", "Command timed out");
+            }
+
+            var stdout = await outputTask.ConfigureAwait(false);
+            var stderr = await errorTask.ConfigureAwait(false);
+            return new Result(process.ExitCode, trimOutput ? stdout.Trim() : stdout, stderr.Trim());
+        }
+        catch (Exception ex)
+        {
+            return new Result(-1, "", ex.Message);
+        }
+    }
 }

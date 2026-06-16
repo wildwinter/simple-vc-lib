@@ -1,5 +1,6 @@
 import { resolve, dirname } from 'path';
 import { statSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
+import { writeFile, readFile, mkdir } from 'fs/promises';
 import { loadConfig } from './config.js';
 import { detectProvider, clearDetectorCache } from './detector.js';
 import { GitProvider } from './providers/gitProvider.js';
@@ -122,6 +123,26 @@ export function renameFolder(oldPath, newPath) {
   return resolveProvider(oldPath).renameFolder(oldPath, newPath);
 }
 
+/** Async twin of {@link deleteFile}. @param {string} filePath */
+export function deleteFileAsync(filePath) {
+  return resolveProvider(filePath).deleteFileAsync(filePath);
+}
+
+/** Async twin of {@link deleteFolder}. @param {string} folderPath */
+export function deleteFolderAsync(folderPath) {
+  return resolveProvider(folderPath).deleteFolderAsync(folderPath);
+}
+
+/** Async twin of {@link renameFile}. @param {string} oldPath @param {string} newPath */
+export function renameFileAsync(oldPath, newPath) {
+  return resolveProvider(oldPath).renameFileAsync(oldPath, newPath);
+}
+
+/** Async twin of {@link renameFolder}. @param {string} oldPath @param {string} newPath */
+export function renameFolderAsync(oldPath, newPath) {
+  return resolveProvider(oldPath).renameFolderAsync(oldPath, newPath);
+}
+
 /**
  * Write text to a file, handling VC checkout and registration automatically.
  * Calls `prepareToWrite`, writes the file, then calls `finishedWrite`.
@@ -216,18 +237,112 @@ export function writeTextFiles(files, encoding = 'utf8') {
   return { success: results.every((r) => r.success), results };
 }
 
+/** Async twin of {@link prepareToWrite}. @param {string} filePath */
+export function prepareToWriteAsync(filePath) {
+  return resolveProvider(filePath).prepareToWriteAsync(filePath);
+}
+
+/** Async twin of {@link finishedWrite}. @param {string} filePath */
+export function finishedWriteAsync(filePath) {
+  return resolveProvider(filePath).finishedWriteAsync(filePath);
+}
+
 /**
- * Status for a batch of files: tracked / writable / locked-by / opened-by-me /
- * out-of-date, per file. Paths are grouped by provider so a whole project
- * costs a spawn or two, not one per file (Perforce: ONE `p4 -ztag fstat`; git:
- * one `git status` + one `git lfs locks` per repository). The writable bit is
+ * Async twin of {@link writeTextFile}.
+ *
+ * @param {string} filePath
+ * @param {string} content
+ * @param {BufferEncoding} [encoding='utf8']
+ * @param {boolean} [forceWrite=false]
+ */
+export async function writeTextFileAsync(filePath, content, encoding = 'utf8', forceWrite = false) {
+  if (!forceWrite && existsSync(filePath)) {
+    try {
+      const existing = await readFile(filePath, { encoding });
+      if (existing === content) return { success: true, status: 'ok', message: '' };
+    } catch {
+      // If the file can't be read, fall through to the normal write path.
+    }
+  }
+  const prep = await resolveProvider(filePath).prepareToWriteAsync(filePath);
+  if (!prep.success) return prep;
+  try {
+    await writeFile(filePath, content, { encoding });
+  } catch (e) {
+    return { success: false, status: 'error', message: e.message };
+  }
+  return resolveProvider(filePath).finishedWriteAsync(filePath);
+}
+
+/**
+ * Async twin of {@link writeBinaryFile}.
+ *
+ * @param {string} filePath
+ * @param {Buffer | Uint8Array} data
+ * @param {boolean} [forceWrite=false]
+ */
+export async function writeBinaryFileAsync(filePath, data, forceWrite = false) {
+  if (!forceWrite && existsSync(filePath)) {
+    try {
+      const existing = await readFile(filePath);
+      const incoming = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      if (existing.equals(incoming)) return { success: true, status: 'ok', message: '' };
+    } catch {
+      // If the file can't be read, fall through to the normal write path.
+    }
+  }
+  const prep = await resolveProvider(filePath).prepareToWriteAsync(filePath);
+  if (!prep.success) return prep;
+  try {
+    await writeFile(filePath, data);
+  } catch (e) {
+    return { success: false, status: 'error', message: e.message };
+  }
+  return resolveProvider(filePath).finishedWriteAsync(filePath);
+}
+
+/**
+ * Async twin of {@link writeTextFiles}. Files are processed sequentially - VC checkout
+ * commands on one workspace are not safe to run concurrently - so behaviour matches the
+ * sync version exactly.
+ *
+ * @param {{filePath: string, content: string}[]} files
+ * @param {BufferEncoding} [encoding='utf8']
+ */
+export async function writeTextFilesAsync(files, encoding = 'utf8') {
+  const results = [];
+  for (const { filePath, content } of files) {
+    try {
+      await mkdir(dirname(resolve(filePath)), { recursive: true });
+    } catch (e) {
+      results.push({ filePath, success: false, status: 'error', message: e.message });
+      continue;
+    }
+    const result = await writeTextFileAsync(filePath, content, encoding);
+    results.push({ filePath, success: result.success, status: result.status, message: result.message });
+  }
+  return { success: results.every((r) => r.success), results };
+}
+
+/**
+ * Status for a batch of files: tracked / writable / dirty / locked-by /
+ * opened-by-me / out-of-date, per file. Paths are grouped by provider so a whole
+ * project costs a spawn or two, not one per file (Perforce: ONE `p4 -ztag fstat`;
+ * git: one `git status` + one `git lfs locks` per repository). The writable bit is
  * always reported - in lock-based workflows it is the cheap local signal for
  * "is this editable right now?".
  *
+ * By default the read stays as local as each provider allows (git without LFS and
+ * SVN/Plastic do no network). Pass `{ remote: true }` to also fetch server-side
+ * `lockedBy` / `outOfDate` for SVN (`svn status -u`) and Plastic (`cm fileinfo`) -
+ * an extra round-trip. Perforce and git-LFS already carry that data in the one call
+ * they must make, so they report it regardless of this flag.
+ *
  * @param {string[]} filePaths
+ * @param {import('./vcStatus.js').VCStatusOptions} [options]
  * @returns {import('./vcStatus.js').VCFileStatus[]}
  */
-export function fileStatus(filePaths) {
+export function fileStatus(filePaths, options = {}) {
   const groups = new Map();
   for (const filePath of filePaths) {
     const provider = resolveProvider(filePath);
@@ -237,8 +352,36 @@ export function fileStatus(filePaths) {
 
   const byInput = new Map();
   for (const { provider, paths } of groups.values()) {
-    const statuses = provider.status(paths);
+    const statuses = provider.status(paths, options);
     for (let i = 0; i < paths.length; i++) byInput.set(paths[i], statuses[i]);
   }
+  return filePaths.map((filePath) => byInput.get(filePath));
+}
+
+/**
+ * Async twin of {@link fileStatus}. Spawns without blocking the event loop, and -
+ * because providers are independent - runs the per-provider reads concurrently, so a
+ * project spanning several repos/working copies finishes in about the time of its
+ * slowest provider rather than their sum.
+ *
+ * @param {string[]} filePaths
+ * @param {import('./vcStatus.js').VCStatusOptions} [options]
+ * @returns {Promise<import('./vcStatus.js').VCFileStatus[]>}
+ */
+export async function fileStatusAsync(filePaths, options = {}) {
+  const groups = new Map();
+  for (const filePath of filePaths) {
+    const provider = resolveProvider(filePath);
+    if (!groups.has(provider.name)) groups.set(provider.name, { provider, paths: [] });
+    groups.get(provider.name).paths.push(filePath);
+  }
+
+  const byInput = new Map();
+  await Promise.all([...groups.values()].map(async ({ provider, paths }) => {
+    const statuses = provider.statusAsync
+      ? await provider.statusAsync(paths, options)
+      : provider.status(paths, options);
+    for (let i = 0; i < paths.length; i++) byInput.set(paths[i], statuses[i]);
+  }));
   return filePaths.map((filePath) => byInput.get(filePath));
 }

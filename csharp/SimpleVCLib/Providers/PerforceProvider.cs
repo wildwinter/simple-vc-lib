@@ -66,6 +66,62 @@ public class PerforceProvider : IVCProvider
         return VCResult.Error($"Cannot add '{filePath}' to Perforce: {result.Error ?? result.Output}");
     }
 
+    /// <summary>Async twin of <see cref="PrepareToWrite"/>.</summary>
+    public async Task<VCResult> PrepareToWriteAsync(string filePath)
+    {
+        if (!File.Exists(filePath)) return VCResult.Ok();
+
+        var fstat = await FstatAsync(filePath).ConfigureAwait(false);
+        if (!IsInDepotFstat(fstat))
+            return await _fs.PrepareToWriteAsync(filePath).ConfigureAwait(false);
+
+        var action = PendingAction(fstat);
+        if (action is "delete" or "move/delete")
+            return await ReopenAfterPendingDeleteAsync(filePath, fstat, action).ConfigureAwait(false);
+
+        var result = await P4Async(["edit", filePath]).ConfigureAwait(false);
+        if (result.ExitCode == 0) return VCResult.Ok();
+
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        if (combined.Contains("locked by"))
+            return VCResult.Failure(VCStatus.Locked, $"'{filePath}' is locked by another user");
+        if (combined.Contains("out of date"))
+            return VCResult.Failure(VCStatus.OutOfDate, $"'{filePath}' is out of date — sync before editing");
+
+        return VCResult.Error($"Cannot open '{filePath}' for editing: {result.Error ?? result.Output}");
+    }
+
+    /// <summary>Async twin of <see cref="FinishedWrite"/>.</summary>
+    public async Task<VCResult> FinishedWriteAsync(string filePath)
+    {
+        if (!File.Exists(filePath))
+            return VCResult.Error($"'{filePath}' does not exist after write");
+
+        var fstat = await FstatAsync(filePath).ConfigureAwait(false);
+        if (fstat is null)
+            return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
+
+        var action = PendingAction(fstat);
+        if (action is "delete" or "move/delete")
+            return await ReopenAfterPendingDeleteAsync(filePath, fstat, action).ConfigureAwait(false);
+
+        if (IsInDepotFstat(fstat)) return VCResult.Ok();
+
+        var result = await P4Async(["add", filePath]).ConfigureAwait(false);
+        if (result.ExitCode == 0) return VCResult.Ok("File opened for add in Perforce");
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        if (combined.Contains("ignored")) return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
+        return VCResult.Error($"Cannot add '{filePath}' to Perforce: {result.Error ?? result.Output}");
+    }
+
+    // Delete/rename carry intricate pending-changelist handling; rather than duplicate it,
+    // the async twins run the tested sync method on a thread-pool thread (the p4 subprocess
+    // wait parks a pooled thread).
+    public Task<VCResult> DeleteFileAsync(string filePath) => Task.Run(() => DeleteFile(filePath));
+    public Task<VCResult> DeleteFolderAsync(string folderPath) => Task.Run(() => DeleteFolder(folderPath));
+    public Task<VCResult> RenameFileAsync(string oldPath, string newPath) => Task.Run(() => RenameFile(oldPath, newPath));
+    public Task<VCResult> RenameFolderAsync(string oldPath, string newPath) => Task.Run(() => RenameFolder(oldPath, newPath));
+
     public VCResult DeleteFile(string filePath)
     {
         // No early-out on a missing local file: the file may still be opened in a
@@ -229,6 +285,12 @@ public class PerforceProvider : IVCProvider
         return result.ExitCode == 0 ? result.Output : null;
     }
 
+    private static async Task<string?> FstatAsync(string filePath)
+    {
+        var result = await P4Async(["fstat", filePath]).ConfigureAwait(false);
+        return result.ExitCode == 0 ? result.Output : null;
+    }
+
     private static readonly Regex PendingActionField = new(@"^\.\.\. action (\S+)", RegexOptions.Multiline | RegexOptions.Compiled);
     private static readonly Regex MovedFileField = new(@"^\.\.\. movedFile (\S+)", RegexOptions.Multiline | RegexOptions.Compiled);
 
@@ -279,6 +341,24 @@ public class PerforceProvider : IVCProvider
         return VCResult.Error($"Cannot reopen '{filePath}' for edit after reverting pending delete: {editResult.Error ?? editResult.Output}");
     }
 
+    /// <summary>Async twin of <see cref="ReopenAfterPendingDelete"/>.</summary>
+    private static async Task<VCResult> ReopenAfterPendingDeleteAsync(string filePath, string? fstat, string action)
+    {
+        if (action == "move/delete")
+        {
+            var target = MovedCounterpart(fstat);
+            await P4Async(["revert", "-k", target ?? filePath]).ConfigureAwait(false);
+            if (target is not null) await P4Async(["add", target]).ConfigureAwait(false);
+        }
+        else
+        {
+            await P4Async(["revert", "-k", filePath]).ConfigureAwait(false);
+        }
+        var editResult = await P4Async(["edit", filePath]).ConfigureAwait(false);
+        if (editResult.ExitCode == 0) return VCResult.Ok("File reopened for edit after pending delete was reverted");
+        return VCResult.Error($"Cannot reopen '{filePath}' for edit after reverting pending delete: {editResult.Error ?? editResult.Output}");
+    }
+
     /// <summary>Removes the local copy if present; null on success, error result on failure.</summary>
     private static VCResult? RemoveLocal(string filePath)
     {
@@ -318,6 +398,9 @@ public class PerforceProvider : IVCProvider
     private static CommandRunner.Result P4(string[] args) =>
         CommandRunner.Run("p4", args);
 
+    private static Task<CommandRunner.Result> P4Async(string[] args) =>
+        CommandRunner.RunAsync("p4", args);
+
     private static void ClearReadOnly(string dirPath)
     {
         foreach (var file in Directory.EnumerateFiles(dirPath, "*", SearchOption.AllDirectories))
@@ -341,10 +424,26 @@ public class PerforceProvider : IVCProvider
     /// staleness from haveRev &lt; headRev.
     /// </para>
     /// </summary>
-    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths)
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths, bool remote = false)
     {
+        // remote is ignored: p4 fstat is already a server call carrying lock/staleness.
+        _ = remote;
         var result = P4(["-ztag", "fstat", .. filePaths]);
-        var records = result.Output.Length > 0 ? ParseZtag(result.Output) : new List<ZtagRecord>();
+        return BuildPerforceStatuses(result.Output, filePaths);
+    }
+
+    /// <summary>Async twin of <see cref="Status"/>: one <c>p4 -ztag fstat</c>, awaited.</summary>
+    public async Task<IReadOnlyList<VCFileStatus>> StatusAsync(IReadOnlyList<string> filePaths, bool remote = false)
+    {
+        _ = remote;
+        var result = await P4Async(["-ztag", "fstat", .. filePaths]).ConfigureAwait(false);
+        return BuildPerforceStatuses(result.Output, filePaths);
+    }
+
+    /// <summary>Assemble per-file statuses from one <c>p4 -ztag fstat</c> output. Pure.</summary>
+    private static IReadOnlyList<VCFileStatus> BuildPerforceStatuses(string output, IReadOnlyList<string> filePaths)
+    {
+        var records = output.Length > 0 ? ParseZtag(output) : new List<ZtagRecord>();
 
         var byClientFile = new Dictionary<string, ZtagRecord>();
         foreach (var record in records)

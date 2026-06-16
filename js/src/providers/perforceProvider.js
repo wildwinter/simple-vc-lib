@@ -1,6 +1,6 @@
 import { existsSync, unlinkSync, chmodSync, rmSync, cpSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { resolve } from 'path';
-import { runCommand } from '../commandRunner.js';
+import { runCommand, runCommandAsync } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { writableBit } from '../vcStatus.js';
 import { FilesystemProvider } from './filesystemProvider.js';
@@ -20,6 +20,10 @@ function p4(args) {
   return runCommand('p4', args);
 }
 
+function p4Async(args) {
+  return runCommandAsync('p4', args);
+}
+
 /**
  * Returns p4 fstat info for a file, or null if the file is not in the depot.
  */
@@ -27,6 +31,11 @@ function fstat(filePath) {
   const result = p4(['fstat', filePath]);
   if (result.exitCode !== 0) return null;
   return result.output;
+}
+
+async function fstatAsync(filePath) {
+  const result = await p4Async(['fstat', filePath]);
+  return result.exitCode !== 0 ? null : result.output;
 }
 
 /**
@@ -63,6 +72,20 @@ function reopenAfterPendingDelete(filePath, info, action) {
     p4(['revert', '-k', filePath]);
   }
   const editResult = p4(['edit', filePath]);
+  if (editResult.exitCode === 0) return okResult('File reopened for edit after pending delete was reverted');
+  return errorResult('error', `Cannot reopen '${filePath}' for edit after reverting pending delete: ${editResult.error || editResult.output}`);
+}
+
+/** Async twin of {@link reopenAfterPendingDelete}. */
+async function reopenAfterPendingDeleteAsync(filePath, info, action) {
+  if (action === 'move/delete') {
+    const target = movedCounterpart(info);
+    await p4Async(['revert', '-k', target ?? filePath]);
+    if (target) await p4Async(['add', target]);
+  } else {
+    await p4Async(['revert', '-k', filePath]);
+  }
+  const editResult = await p4Async(['edit', filePath]);
   if (editResult.exitCode === 0) return okResult('File reopened for edit after pending delete was reverted');
   return errorResult('error', `Cannot reopen '${filePath}' for edit after reverting pending delete: ${editResult.error || editResult.output}`);
 }
@@ -150,6 +173,56 @@ export class PerforceProvider {
     // File is ignored (e.g. matches a .p4ignore pattern) — treat as outside the depot.
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('ignored')) return fs.finishedWrite(filePath);
+    return errorResult('error', `Cannot add '${filePath}' to Perforce: ${result.error || result.output}`);
+  }
+
+  /** Async twin of {@link prepareToWrite}. */
+  async prepareToWriteAsync(filePath) {
+    if (!existsSync(filePath)) return okResult();
+
+    const info = await fstatAsync(filePath);
+    if (!isInDepotFstat(info)) {
+      return fs.prepareToWriteAsync(filePath);
+    }
+
+    const action = pendingAction(info);
+    if (action === 'delete' || action === 'move/delete') {
+      return reopenAfterPendingDeleteAsync(filePath, info, action);
+    }
+
+    const result = await p4Async(['edit', filePath]);
+    if (result.exitCode === 0) return okResult();
+
+    const combined = (result.output + ' ' + result.error).toLowerCase();
+    if (combined.includes('locked by')) {
+      return errorResult('locked', `'${filePath}' is locked by another user`);
+    }
+    if (combined.includes('out of date')) {
+      return errorResult('outOfDate', `'${filePath}' is out of date — sync before editing`);
+    }
+    return errorResult('error', `Cannot open '${filePath}' for editing: ${result.error || result.output}`);
+  }
+
+  /** Async twin of {@link finishedWrite}. */
+  async finishedWriteAsync(filePath) {
+    if (!existsSync(filePath))
+      return errorResult('error', `'${filePath}' does not exist after write`);
+
+    const info = await fstatAsync(filePath);
+    if (info === null)
+      return fs.finishedWriteAsync(filePath);
+
+    const action = pendingAction(info);
+    if (action === 'delete' || action === 'move/delete') {
+      return reopenAfterPendingDeleteAsync(filePath, info, action);
+    }
+
+    if (isInDepotFstat(info)) return okResult();
+
+    const result = await p4Async(['add', filePath]);
+    if (result.exitCode === 0) return okResult('File opened for add in Perforce');
+    const combined = (result.output + ' ' + result.error).toLowerCase();
+    if (combined.includes('ignored')) return fs.finishedWriteAsync(filePath);
     return errorResult('error', `Cannot add '${filePath}' to Perforce: ${result.error || result.output}`);
   }
 
@@ -320,6 +393,136 @@ export class PerforceProvider {
     return okResult();
   }
 
+  /** Async twin of {@link deleteFile}. Mirrors the sync branches; shares the pure helpers. */
+  async deleteFileAsync(filePath) {
+    const info = await fstatAsync(filePath);
+    const action = pendingAction(info);
+
+    const removeLocal = () => {
+      if (!existsSync(filePath)) return null;
+      try {
+        chmodSync(filePath, 0o666);
+        unlinkSync(filePath);
+        return null;
+      } catch (e) {
+        return errorResult('error', `Cannot remove '${filePath}' from disk: ${e.message}`);
+      }
+    };
+
+    if (action === 'add') {
+      await p4Async(['revert', '-k', filePath]);
+      return removeLocal() ?? okResult();
+    }
+    if (action === 'move/add') {
+      const source = movedCounterpart(info);
+      await p4Async(['revert', '-k', filePath]);
+      if (source) await p4Async(['delete', source]);
+      return removeLocal() ?? okResult();
+    }
+    if (action === 'delete' || action === 'move/delete') {
+      return removeLocal() ?? okResult();
+    }
+    if (action !== null) {
+      await p4Async(['revert', '-k', filePath]);
+    }
+    if (isInDepotFstat(info)) {
+      const localError = removeLocal();
+      if (localError) return localError;
+      const result = await p4Async(['delete', filePath]);
+      if (result.exitCode !== 0)
+        return errorResult('error', `Cannot delete '${filePath}' from Perforce: ${result.error || result.output}`);
+      return okResult();
+    }
+    return removeLocal() ?? okResult();
+  }
+
+  /** Async twin of {@link renameFile}. */
+  async renameFileAsync(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+
+    const dstInfo = await fstatAsync(newPath);
+    const dstAction = pendingAction(dstInfo);
+    if (dstAction === 'add' || dstAction === 'move/add') {
+      const cleared = await this.deleteFileAsync(newPath);
+      if (!cleared.success) return cleared;
+    } else if (dstAction === 'delete' || dstAction === 'move/delete') {
+      await p4Async(['revert', '-k', newPath]);
+      try {
+        if (existsSync(newPath)) {
+          chmodSync(newPath, 0o666);
+          unlinkSync(newPath);
+        }
+      } catch (e) {
+        return errorResult('error', `Cannot rename '${oldPath}' over '${newPath}': ${e.message}`);
+      }
+      const moved = await fs.renameFileAsync(oldPath, newPath);
+      if (!moved.success) return moved;
+      const editResult = await p4Async(['edit', newPath]);
+      if (editResult.exitCode !== 0)
+        return errorResult('error', `Cannot rename '${oldPath}' over pending-delete '${newPath}': ${editResult.error || editResult.output}`);
+      return this.deleteFileAsync(oldPath);
+    }
+
+    const info = await fstatAsync(oldPath);
+    if (!isInDepotFstat(info)) return fs.renameFileAsync(oldPath, newPath);
+
+    const action = pendingAction(info);
+    if (action === 'delete' || action === 'move/delete') {
+      const reopened = await reopenAfterPendingDeleteAsync(oldPath, info, action);
+      if (!reopened.success) return reopened;
+    } else if (action === null) {
+      await p4Async(['edit', oldPath]);
+    }
+
+    const result = await p4Async(['move', oldPath, newPath]);
+    const combined = ((result.output || '') + ' ' + (result.error || '')).toLowerCase();
+    if (result.exitCode === 0 && combined.includes('moved from')) return okResult();
+    return errorResult('error', `Cannot rename '${oldPath}' in Perforce: ${result.error || result.output}`);
+  }
+
+  /** Async twin of {@link renameFolder}. */
+  async renameFolderAsync(oldPath, newPath) {
+    if (!existsSync(oldPath)) return okResult();
+    const isWin = process.platform === 'win32';
+    const src = (isWin ? oldPath.replace(/\\/g, '/') : oldPath) + '/...';
+    const dst = (isWin ? newPath.replace(/\\/g, '/') : newPath) + '/...';
+    await p4Async(['edit', src]);
+    await p4Async(['move', src, dst]);
+    if (existsSync(oldPath)) {
+      try {
+        mkdirSync(newPath, { recursive: true });
+        cpSync(oldPath, newPath, { recursive: true });
+        clearReadOnly(oldPath);
+        rmSync(oldPath, { recursive: true, force: true });
+      } catch (e) {
+        return errorResult('error', `Cannot rename folder '${oldPath}': ${e.message}`);
+      }
+    }
+    return okResult();
+  }
+
+  /** Async twin of {@link deleteFolder}. */
+  async deleteFolderAsync(folderPath) {
+    if (!existsSync(folderPath)) return okResult();
+    const isWin = process.platform === 'win32';
+    const depotPath = (isWin ? folderPath.replace(/\\/g, '/') : folderPath) + '/...';
+    const result = await p4Async(['delete', depotPath]);
+
+    if (existsSync(folderPath)) {
+      try {
+        rmSync(folderPath, { recursive: true, force: true });
+      } catch (e) {
+        return errorResult('error', `Cannot delete folder '${folderPath}': ${e.message}`);
+      }
+    }
+
+    if (result.exitCode !== 0 && result.error && !result.error.includes('no such file')) {
+      return errorResult('error', `Cannot delete folder '${folderPath}' from Perforce: ${result.error || result.output}`);
+    }
+
+    return okResult();
+  }
+
   /**
    * Status for a batch of files in ONE `p4 -ztag fstat` spawn.
    *
@@ -333,9 +536,28 @@ export class PerforceProvider {
    */
   status(filePaths) {
     const result = p4(['-ztag', 'fstat', ...filePaths]);
-    const records = result.output ? parseZtag(result.output) : [];
+    return buildPerforceStatuses(result.output, filePaths);
+  }
 
-    const byClientFile = new Map();
+  /** Async twin of {@link status}: one `p4 -ztag fstat`, spawned without blocking. */
+  async statusAsync(filePaths) {
+    const result = await p4Async(['-ztag', 'fstat', ...filePaths]);
+    return buildPerforceStatuses(result.output, filePaths);
+  }
+}
+
+/**
+ * Assemble per-file statuses from one `p4 -ztag fstat` output. Pure - shared by the
+ * sync and async paths.
+ *
+ * @param {string} output
+ * @param {string[]} filePaths
+ * @returns {import('../vcStatus.js').VCFileStatus[]}
+ */
+function buildPerforceStatuses(output, filePaths) {
+  const records = output ? parseZtag(output) : [];
+
+  const byClientFile = new Map();
     for (const record of records) {
       const clientFile = record.fields.get('clientFile');
       if (clientFile) byClientFile.set(resolve(clientFile), record);
@@ -376,7 +598,6 @@ export class PerforceProvider {
       if (headRev > haveRev && !deletedAtHead) status.outOfDate = true;
       return status;
     });
-  }
 }
 
 /**

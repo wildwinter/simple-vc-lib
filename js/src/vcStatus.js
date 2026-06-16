@@ -19,6 +19,17 @@ import { statSync } from 'fs';
  */
 
 /**
+ * Options for a status read.
+ *
+ * @typedef {object} VCStatusOptions
+ * @property {boolean} [remote] - Permit a server round-trip to fetch `lockedBy` /
+ *   `outOfDate` where the provider needs one (SVN: `svn status -u`; Plastic:
+ *   `cm fileinfo`). Default false keeps the read local where possible. Providers
+ *   that already carry that data for free (Perforce, git-LFS) ignore this and
+ *   report it either way.
+ */
+
+/**
  * The read-only bit: cheap, local, and the primary editability signal under
  * lock-based workflows. A file not on disk yet counts as writable.
  *

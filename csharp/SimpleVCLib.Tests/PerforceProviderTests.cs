@@ -189,6 +189,44 @@ public class PerforceProviderTests : IDisposable
         Assert.False(File.Exists(filePath));
     }
 
+    // --- async twins (Task.Run over the tested sync logic) -------------------
+
+    [Fact]
+    public async Task Async_PrepareToWriteAsync_SubmittedFile_OpensForEdit()
+    {
+        if (!_available) return;
+        var filePath = Path.Combine(_testDir, "async-ptw.txt");
+        SubmitFile(filePath);
+        var result = await VCLib.PrepareToWriteAsync(filePath);
+        Assert.True(result.Success, result.Message);
+        Assert.Contains("action", P4Checked($"fstat \"{filePath}\"").Output);
+    }
+
+    [Fact]
+    public async Task Async_DeleteFileAsync_SubmittedFile_OpensForDelete()
+    {
+        if (!_available) return;
+        var filePath = Path.Combine(_testDir, "async-del.txt");
+        SubmitFile(filePath);
+        var result = await VCLib.DeleteFileAsync(filePath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(filePath));
+        Assert.Contains("delete", P4Checked($"fstat \"{filePath}\"").Output);
+    }
+
+    [Fact]
+    public async Task Async_RenameFileAsync_SubmittedFile_UsesP4Move()
+    {
+        if (!_available) return;
+        var oldPath = Path.Combine(_testDir, "async-ren-src.txt");
+        var newPath = Path.Combine(_testDir, "async-ren-dst.txt");
+        SubmitFile(oldPath, "content");
+        var result = await VCLib.RenameFileAsync(oldPath, newPath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(File.Exists(oldPath));
+        Assert.True(File.Exists(newPath));
+    }
+
     [Fact]
     public void RenameFile_SubmittedFile_UsesP4Move()
     {

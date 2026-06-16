@@ -33,6 +33,17 @@ export interface VCFileStatus {
   dirty?: boolean;
 }
 
+/** Options for a status read. */
+export interface VCStatusOptions {
+  /**
+   * Permit a server round-trip to fetch `lockedBy` / `outOfDate` where the provider
+   * needs one (SVN: `svn status -u`; Plastic: `cm fileinfo`). Default false keeps the
+   * read local where possible. Perforce and git-LFS carry that data for free and
+   * report it either way.
+   */
+  remote?: boolean;
+}
+
 /** The outcome of one file in a writeTextFiles batch. */
 export interface VCWriteOutcome {
   filePath: string;
@@ -45,72 +56,120 @@ export interface IVCProvider {
   readonly name: string;
   prepareToWrite(filePath: string): VCResult;
   finishedWrite(filePath: string): VCResult;
+  prepareToWriteAsync(filePath: string): Promise<VCResult>;
+  finishedWriteAsync(filePath: string): Promise<VCResult>;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  deleteFileAsync(filePath: string): Promise<VCResult>;
+  deleteFolderAsync(folderPath: string): Promise<VCResult>;
+  renameFileAsync(oldPath: string, newPath: string): Promise<VCResult>;
+  renameFolderAsync(oldPath: string, newPath: string): Promise<VCResult>;
   /** Batched per-file status (one spawn per provider / repository, not per file). */
-  status(filePaths: string[]): VCFileStatus[];
+  status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
+  /** Async twin of {@link status}. */
+  statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
 }
 
 export declare class GitProvider implements IVCProvider {
   readonly name: 'git';
   prepareToWrite(filePath: string): VCResult;
   finishedWrite(filePath: string): VCResult;
+  prepareToWriteAsync(filePath: string): Promise<VCResult>;
+  finishedWriteAsync(filePath: string): Promise<VCResult>;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  deleteFileAsync(filePath: string): Promise<VCResult>;
+  deleteFolderAsync(folderPath: string): Promise<VCResult>;
+  renameFileAsync(oldPath: string, newPath: string): Promise<VCResult>;
+  renameFolderAsync(oldPath: string, newPath: string): Promise<VCResult>;
   /** Batched per-file status (one spawn per provider / repository, not per file). */
-  status(filePaths: string[]): VCFileStatus[];
+  status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
+  /** Async twin of {@link status}. */
+  statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
 }
 
 export declare class PerforceProvider implements IVCProvider {
   readonly name: 'perforce';
   prepareToWrite(filePath: string): VCResult;
   finishedWrite(filePath: string): VCResult;
+  prepareToWriteAsync(filePath: string): Promise<VCResult>;
+  finishedWriteAsync(filePath: string): Promise<VCResult>;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  deleteFileAsync(filePath: string): Promise<VCResult>;
+  deleteFolderAsync(folderPath: string): Promise<VCResult>;
+  renameFileAsync(oldPath: string, newPath: string): Promise<VCResult>;
+  renameFolderAsync(oldPath: string, newPath: string): Promise<VCResult>;
   /** Batched per-file status (one spawn per provider / repository, not per file). */
-  status(filePaths: string[]): VCFileStatus[];
+  status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
+  /** Async twin of {@link status}. */
+  statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
 }
 
 export declare class PlasticProvider implements IVCProvider {
   readonly name: 'plastic';
   prepareToWrite(filePath: string): VCResult;
   finishedWrite(filePath: string): VCResult;
+  prepareToWriteAsync(filePath: string): Promise<VCResult>;
+  finishedWriteAsync(filePath: string): Promise<VCResult>;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  deleteFileAsync(filePath: string): Promise<VCResult>;
+  deleteFolderAsync(folderPath: string): Promise<VCResult>;
+  renameFileAsync(oldPath: string, newPath: string): Promise<VCResult>;
+  renameFolderAsync(oldPath: string, newPath: string): Promise<VCResult>;
   /** Batched per-file status (one spawn per provider / repository, not per file). */
-  status(filePaths: string[]): VCFileStatus[];
+  status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
+  /** Async twin of {@link status}. */
+  statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
 }
 
 export declare class SvnProvider implements IVCProvider {
   readonly name: 'svn';
   prepareToWrite(filePath: string): VCResult;
   finishedWrite(filePath: string): VCResult;
+  prepareToWriteAsync(filePath: string): Promise<VCResult>;
+  finishedWriteAsync(filePath: string): Promise<VCResult>;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  deleteFileAsync(filePath: string): Promise<VCResult>;
+  deleteFolderAsync(folderPath: string): Promise<VCResult>;
+  renameFileAsync(oldPath: string, newPath: string): Promise<VCResult>;
+  renameFolderAsync(oldPath: string, newPath: string): Promise<VCResult>;
   /** Batched per-file status (one spawn per provider / repository, not per file). */
-  status(filePaths: string[]): VCFileStatus[];
+  status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
+  /** Async twin of {@link status}. */
+  statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
 }
 
 export declare class FilesystemProvider implements IVCProvider {
   readonly name: 'filesystem';
   prepareToWrite(filePath: string): VCResult;
   finishedWrite(filePath: string): VCResult;
+  prepareToWriteAsync(filePath: string): Promise<VCResult>;
+  finishedWriteAsync(filePath: string): Promise<VCResult>;
   deleteFile(filePath: string): VCResult;
   deleteFolder(folderPath: string): VCResult;
   renameFile(oldPath: string, newPath: string): VCResult;
   renameFolder(oldPath: string, newPath: string): VCResult;
+  deleteFileAsync(filePath: string): Promise<VCResult>;
+  deleteFolderAsync(folderPath: string): Promise<VCResult>;
+  renameFileAsync(oldPath: string, newPath: string): Promise<VCResult>;
+  renameFolderAsync(oldPath: string, newPath: string): Promise<VCResult>;
   /** Batched per-file status (one spawn per provider / repository, not per file). */
-  status(filePaths: string[]): VCFileStatus[];
+  status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
+  /** Async twin of {@link status}. */
+  statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
 }
 
 /**
@@ -171,12 +230,47 @@ export declare function writeBinaryFile(filePath: string, data: Buffer | Uint8Ar
  */
 export declare function writeTextFiles(files: { filePath: string; content: string }[], encoding?: BufferEncoding): { success: boolean; results: VCWriteOutcome[] };
 
+/** Async twin of {@link prepareToWrite}. */
+export declare function prepareToWriteAsync(filePath: string): Promise<VCResult>;
+
+/** Async twin of {@link finishedWrite}. */
+export declare function finishedWriteAsync(filePath: string): Promise<VCResult>;
+
+/** Async twin of {@link writeTextFile}. */
+export declare function writeTextFileAsync(filePath: string, content: string, encoding?: BufferEncoding, forceWrite?: boolean): Promise<VCResult>;
+
+/** Async twin of {@link writeBinaryFile}. */
+export declare function writeBinaryFileAsync(filePath: string, data: Buffer | Uint8Array, forceWrite?: boolean): Promise<VCResult>;
+
+/** Async twin of {@link writeTextFiles}. */
+export declare function writeTextFilesAsync(files: { filePath: string; content: string }[], encoding?: BufferEncoding): Promise<{ success: boolean; results: VCWriteOutcome[] }>;
+
+/** Async twin of {@link deleteFile}. */
+export declare function deleteFileAsync(filePath: string): Promise<VCResult>;
+
+/** Async twin of {@link deleteFolder}. */
+export declare function deleteFolderAsync(folderPath: string): Promise<VCResult>;
+
+/** Async twin of {@link renameFile}. */
+export declare function renameFileAsync(oldPath: string, newPath: string): Promise<VCResult>;
+
+/** Async twin of {@link renameFolder}. */
+export declare function renameFolderAsync(oldPath: string, newPath: string): Promise<VCResult>;
+
 /**
- * Status for a batch of files: tracked / writable / locked-by / opened-by-me /
- * out-of-date / dirty. Paths are grouped by provider so a whole project costs a
- * spawn or two, not one per file.
+ * Status for a batch of files: tracked / writable / dirty / locked-by /
+ * opened-by-me / out-of-date. Paths are grouped by provider so a whole project
+ * costs a spawn or two, not one per file. Pass `{ remote: true }` to fetch
+ * server-side `lockedBy` / `outOfDate` for SVN and Plastic (an extra round-trip).
  */
-export declare function fileStatus(filePaths: string[]): VCFileStatus[];
+export declare function fileStatus(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
+
+/**
+ * Async twin of {@link fileStatus}: spawns without blocking, and runs the per-provider
+ * reads concurrently so a multi-repo project finishes in about the time of its slowest
+ * provider rather than the sum.
+ */
+export declare function fileStatusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
 
 /**
  * Override the command runner used for all VC operations - lets tests inject
