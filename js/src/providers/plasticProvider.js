@@ -2,7 +2,7 @@ import { existsSync, unlinkSync, rmSync } from 'fs';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { writableBit } from '../vcStatus.js';
-import { resolve } from 'path';
+import { basename, resolve } from 'path';
 import { FilesystemProvider } from './filesystemProvider.js';
 
 const fs = new FilesystemProvider();
@@ -132,16 +132,89 @@ export class PlasticProvider {
   }
 
   /**
-   * Status for a batch of files. Full Plastic reads (cm status / lock list) are TODO; reports the writable bit.
+   * Status for a batch of files in ONE `cm status --machinereadable --all --ignored`
+   * spawn. The machine format lists one item per line as `<2-letter code> <path>`
+   * (absolute paths, quoted when they contain spaces).
+   *
+   * Flag choice matters: `cm status` defaults to `--controlledchanged`, which omits
+   * a content-modified-but-not-checked-out file (CH) and local deletes/moves. `--all`
+   * adds changed + localdeleted + localmoved + private; `--ignored` adds IG. Together
+   * they surface every dirty and every untracked item, so a not-listed file can be
+   * read as clean-and-controlled. Lock owners and out-of-date remain TODO.
+   *
+   * NOTE: status codes and flag semantics are validated against the Unity VCS CLI
+   * docs, not a live workspace - worth one real smoke test on a Plastic install.
    *
    * @param {string[]} filePaths
    * @returns {import('../vcStatus.js').VCFileStatus[]}
    */
   status(filePaths) {
+    const targets = filePaths.map((p) => resolve(p));
+    const result = cm(['status', '--machinereadable', '--all', '--ignored', ...targets]);
+    const byPath = new Map();
+    const byBase = new Map();
+    if (result.exitCode === 0 && result.output) {
+      for (const line of result.output.split('\n')) {
+        const parsed = parseCmStatusLine(line);
+        if (!parsed) continue;
+        for (const p of parsed.paths) {
+          const abs = resolve(p);
+          byPath.set(abs, parsed.info);
+          const base = basename(abs);
+          if (!byBase.has(base)) byBase.set(base, []);
+          byBase.get(base).push(parsed.info);
+        }
+      }
+    }
+
     return filePaths.map((filePath) => {
       const abs = resolve(filePath);
-      return { filePath: abs, system: 'plastic', writable: writableBit(abs) };
+      /** @type {import('../vcStatus.js').VCFileStatus} */
+      const status = { filePath: abs, system: 'plastic', writable: writableBit(abs) };
+      let info = byPath.get(abs);
+      if (!info) {
+        const sameName = byBase.get(basename(abs));
+        if (sameName && sameName.length === 1) info = sameName[0];
+      }
+      if (info) {
+        status.tracked = info.tracked;
+        status.dirty = info.dirty;
+      } else if (existsSync(abs)) {
+        // Not listed by `cm status --all --ignored` = controlled, no pending change.
+        status.tracked = true;
+        status.dirty = false;
+      }
+      return status;
     });
   }
+}
+
+/** `cm` machine-readable status codes for a controlled file with a pending change. */
+const PLASTIC_DIRTY_CODES = new Set([
+  'CH', 'CO', 'AD', 'CP', 'RP', 'MV', 'DE', 'LD', 'LM',
+]);
+/** Codes meaning the path is not under version control. */
+const PLASTIC_UNTRACKED_CODES = new Set(['PR', 'IG']);
+
+/**
+ * Parse one `cm status --machinereadable` line into a classification and the
+ * path(s) it concerns. Returns null for the header / blank / unrecognised lines.
+ * A move (`MV "src" "dst"`) carries two quoted paths; both are flagged.
+ *
+ * @param {string} line
+ * @returns {{info: {tracked: boolean, dirty: boolean}, paths: string[]} | null}
+ */
+function parseCmStatusLine(line) {
+  const trimmed = line.trim();
+  const space = trimmed.indexOf(' ');
+  if (space === -1) return null;
+  const code = trimmed.slice(0, space);
+  const dirty = PLASTIC_DIRTY_CODES.has(code);
+  const untracked = PLASTIC_UNTRACKED_CODES.has(code);
+  if (!dirty && !untracked) return null; // STATUS header, blank, or unknown code
+  const rest = trimmed.slice(space + 1).trim();
+  const quoted = [...rest.matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+  const paths = quoted.length > 0 ? quoted : [rest];
+  return { info: { tracked: !untracked, dirty }, paths };
 }
 

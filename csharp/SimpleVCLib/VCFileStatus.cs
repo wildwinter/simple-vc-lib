@@ -11,6 +11,12 @@ namespace SimpleVCLib;
 /// <param name="OpenedByMe">Opened / checked out / locked by the current user.</param>
 /// <param name="LockedBy">Who else has it open or locked (e.g. "bob@bob-ws").</param>
 /// <param name="OutOfDate">A newer revision exists on the server.</param>
+/// <param name="Dirty">
+/// Has pending local VC changes: a tracked file that is modified / staged / opened /
+/// added / deleted but not yet committed. Untracked files are not dirty (they surface
+/// via <see cref="Tracked"/> = false). The cheap, local notion - it does not detect a
+/// file edited outside VC. Null when the provider cannot say.
+/// </param>
 public sealed record VCFileStatus(
     string FilePath,
     string System,
@@ -18,7 +24,8 @@ public sealed record VCFileStatus(
     bool? Tracked = null,
     bool? OpenedByMe = null,
     IReadOnlyList<string>? LockedBy = null,
-    bool? OutOfDate = null);
+    bool? OutOfDate = null,
+    bool? Dirty = null);
 
 internal static class FileStatusHelpers
 {

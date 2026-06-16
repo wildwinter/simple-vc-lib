@@ -27,7 +27,7 @@ internal static class CommandRunner
     /// Arguments are passed as an array to avoid shell injection and handle spaces in paths.
     /// </summary>
     internal static Result Run(string command, string[] args, int timeoutMs = 10000,
-                               string? workingDirectory = null)
+                               string? workingDirectory = null, bool trimOutput = true)
     {
         if (_override is not null)
         {
@@ -65,7 +65,11 @@ internal static class CommandRunner
             // WaitForExit(ms) does not guarantee async streams are flushed; call again.
             process.WaitForExit();
 
-            return new Result(process.ExitCode, outputTask.Result.Trim(), errorTask.Result.Trim());
+            // Output is trimmed by default for convenience; pass trimOutput:false when
+            // byte exactness matters (e.g. `git status -z`, whose first entry can begin
+            // with a significant space that trimming would strip).
+            var output = trimOutput ? outputTask.Result.Trim() : outputTask.Result;
+            return new Result(process.ExitCode, output, errorTask.Result.Trim());
         }
         catch (Exception ex)
         {

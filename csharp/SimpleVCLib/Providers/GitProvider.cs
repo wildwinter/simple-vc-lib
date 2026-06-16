@@ -107,8 +107,8 @@ public class GitProvider : IVCProvider
         return result.ExitCode == 0;
     }
 
-    private static CommandRunner.Result Git(string[] args, string cwd) =>
-        CommandRunner.Run("git", ["-C", cwd, ..args], workingDirectory: cwd);
+    private static CommandRunner.Result Git(string[] args, string cwd, bool trimOutput = true) =>
+        CommandRunner.Run("git", ["-C", cwd, ..args], workingDirectory: cwd, trimOutput: trimOutput);
     /// <summary>
     /// Status for a batch of files: per repository root, ONE
     /// <c>git status --porcelain -z</c> (tracked-ness) plus - when git-lfs is in
@@ -166,7 +166,9 @@ public class GitProvider : IVCProvider
             var root = key;
 
             // -z output: `XY <path>\0` entries, paths relative to the repo root.
-            var st = Git(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], root);
+            // trimOutput:false - a worktree-modified first entry begins with a space
+            // (' M ...') that trimming would strip, shifting the path and losing dirty.
+            var st = Git(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], root, trimOutput: false);
             var states = new Dictionary<string, string>();
             if (st.ExitCode == 0 && st.Output.Length > 0)
             {
@@ -208,13 +210,16 @@ public class GitProvider : IVCProvider
 
             foreach (var (input, relKey) in files)
             {
-                // Absent from porcelain output = clean & tracked; '??' = untracked.
-                var tracked = !states.TryGetValue(relKey, out var xy) || xy != "??";
+                // Absent from porcelain output = clean & tracked; '??' = untracked;
+                // any other code (M/A/D/R/MM/...) = a tracked file with pending changes.
+                var present = states.TryGetValue(relKey, out var xy);
+                var tracked = !present || xy != "??";
                 byInput[input] = new VCFileStatus(
                     Path.GetFullPath(input), "git", FileStatusHelpers.WritableBit(input),
                     Tracked: tracked,
                     OpenedByMe: ours.Contains(relKey) ? true : null,
-                    LockedBy: theirs.TryGetValue(relKey, out var owners) ? owners : null);
+                    LockedBy: theirs.TryGetValue(relKey, out var owners) ? owners : null,
+                    Dirty: present && xy != "??");
             }
         }
 

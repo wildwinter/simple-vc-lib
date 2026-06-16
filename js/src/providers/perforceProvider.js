@@ -349,6 +349,7 @@ export class PerforceProvider {
       if (!record) {
         // fstat returned nothing for it: outside the client view / unknown to p4.
         status.tracked = false;
+        status.dirty = false;
         return status;
       }
 
@@ -358,6 +359,9 @@ export class PerforceProvider {
       const openedByMe = has('action');
       status.tracked = (has('headRev') || has('depotFile')) && (!deletedAtHead || openedByMe);
       if (openedByMe || has('ourLock')) status.openedByMe = true;
+      // Opened in a pending changelist (edit/add/delete) = pending local change.
+      // A file changed on disk without being opened is not detected here.
+      status.dirty = openedByMe;
 
       const otherOpen = record.multi.get('otherOpen') ?? [];
       const otherLock = record.multi.get('otherLock') ?? [];

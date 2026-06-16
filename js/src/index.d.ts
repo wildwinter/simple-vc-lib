@@ -24,6 +24,13 @@ export interface VCFileStatus {
   lockedBy?: string[];
   /** A newer revision exists on the server. */
   outOfDate?: boolean;
+  /**
+   * Has pending local VC changes: a tracked file that is modified / staged / opened /
+   * added / deleted but not yet committed. Untracked files are not dirty (they surface
+   * via `tracked: false`). The cheap, local notion - it does not detect a file edited
+   * outside VC. Undefined when the provider cannot say.
+   */
+  dirty?: boolean;
 }
 
 /** The outcome of one file in a writeTextFiles batch. */
@@ -166,8 +173,8 @@ export declare function writeTextFiles(files: { filePath: string; content: strin
 
 /**
  * Status for a batch of files: tracked / writable / locked-by / opened-by-me /
- * out-of-date. Paths are grouped by provider so a whole project costs a spawn
- * or two, not one per file.
+ * out-of-date / dirty. Paths are grouped by provider so a whole project costs a
+ * spawn or two, not one per file.
  */
 export declare function fileStatus(filePaths: string[]): VCFileStatus[];
 

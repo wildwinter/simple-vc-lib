@@ -11,6 +11,11 @@ import { statSync } from 'fs';
  * @property {boolean} [openedByMe] - Opened / checked out / locked by the current user.
  * @property {string[]} [lockedBy] - Who else has it open or locked (e.g. "bob@bob-ws").
  * @property {boolean} [outOfDate] - A newer revision exists on the server.
+ * @property {boolean} [dirty] - Has pending local VC changes: a tracked file that is
+ *   modified / staged / opened / added / deleted but not yet committed. Untracked files
+ *   are NOT dirty (they surface via `tracked: false`). This is the cheap, local notion -
+ *   it does not detect a file edited outside VC (e.g. a Perforce file made writable and
+ *   changed without being opened). Undefined when the provider cannot say.
  */
 
 /**

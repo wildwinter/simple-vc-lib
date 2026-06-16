@@ -26,11 +26,11 @@ function makeWritable(filePath) {
   }
 }
 
-function git(args, cwd) {
+function git(args, cwd, options = {}) {
   const isWindows = process.platform === 'win32';
   const safeCwd = isWindows ? cwd.replace(/\\/g, '/') : cwd;
   const safeArgs = isWindows ? args.map(arg => typeof arg === 'string' ? arg.replace(/\\/g, '/') : arg) : args;
-  return runCommand('git', ['-C', safeCwd, ...safeArgs], { cwd });
+  return runCommand('git', ['-C', safeCwd, ...safeArgs], { cwd, ...options });
 }
 
 /**
@@ -202,7 +202,9 @@ export class GitProvider {
       const root = key;
 
       // -z output: `XY <path>\0` entries, paths relative to the repo root.
-      const st = git(['status', '--porcelain', '-z', '--', ...files.map((f) => f.relKey)], root);
+      // trim:false - a worktree-modified first entry begins with a space (' M ...')
+      // that trimming would strip, shifting the path and losing the dirty signal.
+      const st = git(['status', '--porcelain', '-z', '--', ...files.map((f) => f.relKey)], root, { trim: false });
       const states = new Map();
       if (st.exitCode === 0 && st.output) {
         for (const entry of st.output.split('\0')) {
@@ -230,12 +232,15 @@ export class GitProvider {
 
       for (const { filePath, abs, relKey } of files) {
         /** @type {import('../vcStatus.js').VCFileStatus} */
+        // Absent from porcelain output = clean & tracked; '??' = untracked;
+        // any other code (M/A/D/R/MM/...) = a tracked file with pending changes.
+        const code = states.get(relKey);
         const status = {
           filePath: abs,
           system: 'git',
           writable: writableBit(abs),
-          // Absent from porcelain output = clean & tracked; '??' = untracked.
-          tracked: states.get(relKey) !== '??',
+          tracked: code !== '??',
+          dirty: code !== undefined && code !== '??',
         };
         if (ours.has(relKey)) status.openedByMe = true;
         const owners = theirs.get(relKey);

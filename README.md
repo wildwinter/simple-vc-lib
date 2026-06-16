@@ -176,15 +176,16 @@ Each result has:
 | `openedByMe` | `bool?` | Opened / checked out / locked by the current user |
 | `lockedBy` | `string[]?` | Who else has it open or locked, e.g. `bob@bob-ws` |
 | `outOfDate` | `bool?` | A newer revision exists on the server |
+| `dirty` | `bool?` | Has pending local VC changes — a tracked file that is modified / staged / opened / added / deleted but not yet committed. Untracked files are not dirty (they surface via `tracked: false`). The cheap, local notion: it does not detect a file edited outside VC (e.g. a Perforce file made writable and changed without being opened). Absent when the provider can't say |
 
 **Calls are batched** — paths are grouped by provider and repository, so a whole project's worth of files costs a spawn or two, not one per file:
 
 | System | How | Depth |
 |---|---|---|
-| **Perforce** | ONE `p4 -ztag fstat` for the whole batch | Full: tracked, checkout/lock owners, out-of-date |
-| **Git** | One `git status --porcelain -z` + one `git lfs locks --verify --json` per repository | Full: tracked, plus lock ownership when git-lfs locking is in use (git itself has no locks) |
-| **Plastic SCM** | — | Writable bit only for now (full reads TODO) |
-| **SVN** | — | Writable bit only for now (full reads TODO; the writable bit still reflects `svn:needs-lock` workflows) |
+| **Perforce** | ONE `p4 -ztag fstat` for the whole batch | Full: tracked, dirty (opened in a changelist), checkout/lock owners, out-of-date |
+| **Git** | One `git status --porcelain -z` + one `git lfs locks --verify --json` per repository | Full: tracked, dirty, plus lock ownership when git-lfs locking is in use (git itself has no locks) |
+| **Plastic SCM** | ONE `cm status --machinereadable --all --ignored` for the whole batch | Tracked + dirty; lock owners and out-of-date still TODO |
+| **SVN** | ONE `svn status --xml -v` for the whole batch | Tracked + dirty; lock owners and out-of-date (`svn status -u`) still TODO. The writable bit still reflects `svn:needs-lock` workflows |
 | **Filesystem** | — | Writable bit only |
 
 Path matching is done on repo-relative paths internally, so symlinked locations (such as macOS `/var` → `/private/var` temp directories) report correctly.

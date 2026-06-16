@@ -1,5 +1,5 @@
 import { existsSync, unlinkSync, rmSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { basename, dirname, resolve } from 'path';
 import { runCommand } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { writableBit } from '../vcStatus.js';
@@ -129,17 +129,90 @@ export class SvnProvider {
   }
 
   /**
-   * Status for a batch of files. Full SVN reads (svn status --xml, lock owners) are TODO; the
-   * writable bit still drives lock-style UI under svn:needs-lock.
+   * Status for a batch of files in ONE `svn status --xml -v` spawn. `-v` lists
+   * clean versioned files too (item="normal"), so tracked-clean is distinguished
+   * from untracked; `--xml` is the stable machine format. Lock owners and
+   * out-of-date (`svn status -u`, a server round-trip) remain TODO.
    *
    * @param {string[]} filePaths
    * @returns {import('../vcStatus.js').VCFileStatus[]}
    */
   status(filePaths) {
+    const targets = filePaths.map((p) => resolve(p));
+    // A bad (non-working-copy) target makes svn exit non-zero, but it still
+    // emits XML for the rest - parse whatever we get and fall back per file.
+    const result = svn(['status', '--xml', '-v', ...targets]);
+    const byPath = new Map();
+    const byBase = new Map();
+    if (result.output) {
+      const entryRe = /<entry\b[^>]*\bpath="([^"]*)"[^>]*>([\s\S]*?)<\/entry>/g;
+      let m;
+      while ((m = entryRe.exec(result.output)) !== null) {
+        const entryPath = resolve(decodeXmlAttr(m[1]));
+        const wcStatus = /<wc-status\b([^>]*)>/.exec(m[2]);
+        if (!wcStatus) continue;
+        const item = /\bitem="([^"]*)"/.exec(wcStatus[1])?.[1] ?? '';
+        const props = /\bprops="([^"]*)"/.exec(wcStatus[1])?.[1] ?? '';
+        const info = classifySvnStatus(item, props);
+        byPath.set(entryPath, info);
+        const base = basename(entryPath);
+        if (!byBase.has(base)) byBase.set(base, []);
+        byBase.get(base).push(info);
+      }
+    }
+
     return filePaths.map((filePath) => {
       const abs = resolve(filePath);
-      return { filePath: abs, system: 'svn', writable: writableBit(abs) };
+      /** @type {import('../vcStatus.js').VCFileStatus} */
+      const status = { filePath: abs, system: 'svn', writable: writableBit(abs) };
+      let info = byPath.get(abs);
+      if (!info) {
+        // svn may canonicalize the echoed path (symlinked parents); fall back to
+        // a basename match when it is unambiguous.
+        const sameName = byBase.get(basename(abs));
+        if (sameName && sameName.length === 1) info = sameName[0];
+      }
+      if (info) {
+        if (info.tracked !== undefined) status.tracked = info.tracked;
+        if (info.dirty !== undefined) status.dirty = info.dirty;
+      }
+      return status;
     });
   }
+}
+
+/** XML wc-status item values that mean a tracked file with pending local changes. */
+const SVN_DIRTY_ITEMS = new Set([
+  'modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'incomplete',
+]);
+/** item values that mean the path is not under version control. */
+const SVN_UNTRACKED_ITEMS = new Set(['unversioned', 'ignored']);
+
+/**
+ * Map an `svn status` wc-status (item + props) to tracked / dirty.
+ * `props` carries property-only modifications ("modified" / "conflicted").
+ *
+ * @param {string} item
+ * @param {string} props
+ * @returns {{tracked?: boolean, dirty?: boolean}}
+ */
+function classifySvnStatus(item, props) {
+  if (SVN_UNTRACKED_ITEMS.has(item)) return { tracked: false, dirty: false };
+  if (item === 'normal' || SVN_DIRTY_ITEMS.has(item)) {
+    const dirty = SVN_DIRTY_ITEMS.has(item) || props === 'modified' || props === 'conflicted';
+    return { tracked: true, dirty };
+  }
+  // 'external', 'none', or anything unrecognised: can't say.
+  return {};
+}
+
+/** Decode the handful of XML entities svn emits in path attributes. */
+function decodeXmlAttr(value) {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&'); // last, so "&amp;lt;" -> "&lt;" not "<"
 }
 

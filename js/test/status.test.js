@@ -8,7 +8,7 @@ import {
   fileStatus, writeTextFiles,
   setProvider, clearProvider,
   setCommandRunner, clearCommandRunner,
-  FilesystemProvider, PerforceProvider,
+  FilesystemProvider, PerforceProvider, SvnProvider, PlasticProvider,
 } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
@@ -72,6 +72,24 @@ describe('fileStatus (git, real repository)', () => {
     const [st] = fileStatus([join(dir, 'tracked.txt')]);
     assert.isFalse(st.writable);
   });
+
+  it('flags a modified tracked file as dirty, clean and untracked as not', () => {
+    const dir = makeTempDir();
+    initGitRepo(dir);
+    writeFileSync(join(dir, 'tracked.txt'), 'tracked + local edit');
+    const [modified, untracked] = fileStatus([join(dir, 'tracked.txt'), join(dir, 'untracked.txt')]);
+    assert.isTrue(modified.tracked);
+    assert.isTrue(modified.dirty);
+    assert.isFalse(untracked.dirty); // untracked is reported via tracked:false, not dirty
+  });
+
+  it('reports a committed, unmodified file as not dirty', () => {
+    const dir = makeTempDir();
+    initGitRepo(dir);
+    const [st] = fileStatus([join(dir, 'tracked.txt')]);
+    assert.isTrue(st.tracked);
+    assert.isFalse(st.dirty);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -113,7 +131,21 @@ describe('fileStatus (perforce, canned ztag)', () => {
     const [st] = fileStatus(['/ws/proj/b.txt']);
     assert.isTrue(st.tracked);
     assert.isTrue(st.openedByMe);
+    assert.isTrue(st.dirty); // opened in a pending changelist = pending local change
     assert.isUndefined(st.lockedBy);
+  });
+
+  it('a synced, unopened file is not dirty', () => {
+    setCommandRunner(cannedP4(ztag([[
+      '... depotFile //depot/proj/d.txt',
+      '... clientFile /ws/proj/d.txt',
+      '... headAction edit',
+      '... headRev 2',
+      '... haveRev 2',
+    ]])));
+    const [st] = fileStatus(['/ws/proj/d.txt']);
+    assert.isTrue(st.tracked);
+    assert.isFalse(st.dirty);
   });
 
   it('treats deleted-at-head as untracked (unless reopened)', () => {
@@ -164,6 +196,131 @@ describe('fileStatus (perforce, canned ztag)', () => {
     });
     fileStatus(['/ws/a.txt', '/ws/b.txt', '/ws/c.txt']);
     assert.equal(fstatCalls, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fileStatus — SVN (canned `svn status --xml -v` transcripts; no svn needed)
+// ---------------------------------------------------------------------------
+
+describe('fileStatus (svn, canned status xml)', () => {
+  beforeEach(() => setProvider(new SvnProvider()));
+
+  /** A canned runner answering `svn status --xml -v` with the given XML. */
+  const cannedSvn = (xml) => (command, args) =>
+    command === 'svn' && args[0] === 'status' && args.includes('--xml')
+      ? { exitCode: 0, output: xml, error: '' }
+      : { exitCode: 1, output: '', error: `unexpected: ${command} ${args.join(' ')}` };
+
+  const entry = (path, item, props = 'none') =>
+    `<entry path="${path}"><wc-status props="${props}" item="${item}" revision="4">` +
+    `<commit revision="4"><author>alice</author></commit></wc-status></entry>`;
+
+  const statusXml = (...entries) =>
+    `<?xml version="1.0"?>\n<status>\n<target path="/ws/wc">\n${entries.join('\n')}\n</target>\n</status>`;
+
+  it('classifies normal / modified / unversioned into tracked + dirty', () => {
+    setCommandRunner(cannedSvn(statusXml(
+      entry('/ws/wc/clean.txt', 'normal'),
+      entry('/ws/wc/edited.txt', 'modified'),
+      entry('/ws/wc/new.txt', 'unversioned'),
+    )));
+    const [clean, edited, untracked] = fileStatus([
+      '/ws/wc/clean.txt', '/ws/wc/edited.txt', '/ws/wc/new.txt',
+    ]);
+    assert.equal(clean.system, 'svn');
+    assert.isTrue(clean.tracked);
+    assert.isFalse(clean.dirty);
+    assert.isTrue(edited.tracked);
+    assert.isTrue(edited.dirty);
+    assert.isFalse(untracked.tracked);
+    assert.isFalse(untracked.dirty);
+  });
+
+  it('treats a property-only modification as dirty', () => {
+    setCommandRunner(cannedSvn(statusXml(entry('/ws/wc/props.txt', 'normal', 'modified'))));
+    const [st] = fileStatus(['/ws/wc/props.txt']);
+    assert.isTrue(st.tracked);
+    assert.isTrue(st.dirty);
+  });
+
+  it('reports writable-only for a path svn does not mention', () => {
+    setCommandRunner(cannedSvn(statusXml(entry('/ws/wc/other.txt', 'normal'))));
+    const [st] = fileStatus(['/ws/wc/missing-from-output.txt']);
+    assert.equal(st.system, 'svn');
+    assert.isUndefined(st.tracked);
+    assert.isUndefined(st.dirty);
+  });
+
+  it('batches every path into ONE status call', () => {
+    let calls = 0;
+    setCommandRunner((command, args) => {
+      calls++;
+      assert.equal(command, 'svn');
+      assert.deepEqual(args.slice(0, 3), ['status', '--xml', '-v']);
+      return { exitCode: 0, output: '', error: '' };
+    });
+    fileStatus(['/ws/wc/a.txt', '/ws/wc/b.txt', '/ws/wc/c.txt']);
+    assert.equal(calls, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fileStatus — Plastic (canned `cm status --machinereadable` transcripts)
+// ---------------------------------------------------------------------------
+
+describe('fileStatus (plastic, canned machinereadable)', () => {
+  beforeEach(() => setProvider(new PlasticProvider()));
+
+  const cannedCm = (out) => (command, args) =>
+    command === 'cm' && args[0] === 'status' && args.includes('--machinereadable')
+      ? { exitCode: 0, output: out, error: '' }
+      : { exitCode: 1, output: '', error: `unexpected: ${command} ${args.join(' ')}` };
+
+  it('classifies changed / checked-out / private', () => {
+    setCommandRunner(cannedCm([
+      'STATUS 23 /main rep:default@server',
+      'CH "/ws/wc/changed.txt"',
+      'CO "/ws/wc/checkedout.txt"',
+      'PR "/ws/wc/new.txt"',
+    ].join('\n')));
+    const [changed, checkedOut, priv] = fileStatus([
+      '/ws/wc/changed.txt', '/ws/wc/checkedout.txt', '/ws/wc/new.txt',
+    ]);
+    assert.equal(changed.system, 'plastic');
+    assert.isTrue(changed.tracked);
+    assert.isTrue(changed.dirty);
+    assert.isTrue(checkedOut.dirty); // checked out = opened = pending local change
+    assert.isFalse(priv.tracked);
+    assert.isFalse(priv.dirty);
+  });
+
+  it('treats a controlled file cm does not list as clean (tracked, not dirty)', () => {
+    const dir = makeTempDir();
+    const file = join(dir, 'clean.txt');
+    writeFileSync(file, 'x');
+    setCommandRunner(cannedCm('STATUS 1 /main rep:default@server'));
+    const [st] = fileStatus([file]);
+    assert.isTrue(st.tracked);
+    assert.isFalse(st.dirty);
+  });
+
+  it('parses unquoted paths too', () => {
+    setCommandRunner(cannedCm('CH /ws/wc/changed.txt'));
+    const [st] = fileStatus(['/ws/wc/changed.txt']);
+    assert.isTrue(st.dirty);
+  });
+
+  it('batches every path into ONE status call', () => {
+    let calls = 0;
+    setCommandRunner((command, args) => {
+      calls++;
+      assert.equal(command, 'cm');
+      assert.deepEqual(args.slice(0, 4), ['status', '--machinereadable', '--all', '--ignored']);
+      return { exitCode: 0, output: '', error: '' };
+    });
+    fileStatus(['/ws/wc/a.txt', '/ws/wc/b.txt']);
+    assert.equal(calls, 1);
   });
 });
 

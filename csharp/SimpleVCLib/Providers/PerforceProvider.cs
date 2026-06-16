@@ -361,7 +361,7 @@ public class PerforceProvider : IVCProvider
             if (!byClientFile.TryGetValue(abs, out var record))
             {
                 // fstat returned nothing for it: outside the client view / unknown to p4.
-                statuses.Add(new VCFileStatus(abs, "perforce", writable, Tracked: false));
+                statuses.Add(new VCFileStatus(abs, "perforce", writable, Tracked: false, Dirty: false));
                 continue;
             }
 
@@ -387,7 +387,10 @@ public class PerforceProvider : IVCProvider
                 Tracked: tracked,
                 OpenedByMe: openedByMe || record.Fields.ContainsKey("ourLock") ? true : null,
                 LockedBy: lockedBy.Count > 0 ? lockedBy : null,
-                OutOfDate: headRev > haveRev && !deletedAtHead ? true : null));
+                OutOfDate: headRev > haveRev && !deletedAtHead ? true : null,
+                // Opened in a pending changelist (edit/add/delete) = pending local change.
+                // A file changed on disk without being opened is not detected here.
+                Dirty: openedByMe));
         }
         return statuses;
     }

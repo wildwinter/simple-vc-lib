@@ -78,6 +78,26 @@ public class StatusTests : IDisposable
         Assert.False(statuses[0].Writable);
     }
 
+    [Fact]
+    public void GitStatusFlagsModifiedTrackedFileAsDirty()
+    {
+        var (_, tracked, untracked) = MakeGitRepo();
+        File.WriteAllText(tracked, "tracked + local edit");
+        var statuses = VCLib.FileStatus([tracked, untracked]);
+        Assert.True(statuses[0].Tracked);
+        Assert.True(statuses[0].Dirty);
+        Assert.False(statuses[1].Dirty); // untracked surfaces via Tracked:false, not Dirty
+    }
+
+    [Fact]
+    public void GitStatusReportsCommittedUnmodifiedFileAsNotDirty()
+    {
+        var (_, tracked, _) = MakeGitRepo();
+        var st = VCLib.FileStatus([tracked])[0];
+        Assert.True(st.Tracked);
+        Assert.False(st.Dirty);
+    }
+
     // -- Perforce (canned -ztag fstat transcripts) ----------------------------
 
     [Fact]
@@ -120,7 +140,25 @@ public class StatusTests : IDisposable
         var st = VCLib.FileStatus([clientFile])[0];
         Assert.True(st.Tracked);
         Assert.True(st.OpenedByMe);
+        Assert.True(st.Dirty); // opened in a pending changelist = pending local change
         Assert.Null(st.LockedBy);
+    }
+
+    [Fact]
+    public void P4StatusReportsSyncedUnopenedFileAsNotDirty()
+    {
+        var clientFile = Path.Combine(TestHelpers.MakeTempDir(), "d.txt");
+        VCLib.SetProvider(new PerforceProvider());
+        VCLib.SetCommandRunner(CannedP4(Ztag([
+            "... depotFile //depot/proj/d.txt",
+            $"... clientFile {clientFile}",
+            "... headAction edit",
+            "... headRev 2",
+            "... haveRev 2",
+        ])));
+        var st = VCLib.FileStatus([clientFile])[0];
+        Assert.True(st.Tracked);
+        Assert.False(st.Dirty);
     }
 
     [Fact]
@@ -189,6 +227,122 @@ public class StatusTests : IDisposable
         });
         VCLib.FileStatus(["/ws/a.txt", "/ws/b.txt", "/ws/c.txt"]);
         Assert.Equal(1, fstatCalls);
+    }
+
+    // -- SVN (canned `svn status --xml -v` transcripts) -----------------------
+
+    /// <summary>A canned runner answering `svn status --xml -v` with the given XML.</summary>
+    private static Func<string, string[], CommandResult> CannedSvn(string xml) =>
+        (command, args) =>
+            command == "svn" && args.Length > 0 && args[0] == "status" && args.Contains("--xml")
+                ? new CommandResult(0, xml, "")
+                : new CommandResult(1, "", $"unexpected: {command} {string.Join(' ', args)}");
+
+    private static string SvnEntry(string path, string item, string props = "none") =>
+        $"<entry path=\"{path}\"><wc-status props=\"{props}\" item=\"{item}\" revision=\"4\">" +
+        "<commit revision=\"4\"><author>alice</author></commit></wc-status></entry>";
+
+    private static string SvnStatusXml(params string[] entries) =>
+        "<?xml version=\"1.0\"?>\n<status>\n<target path=\"/ws/wc\">\n" +
+        string.Join("\n", entries) + "\n</target>\n</status>";
+
+    [Fact]
+    public void SvnStatusClassifiesNormalModifiedUnversioned()
+    {
+        var dir = TestHelpers.MakeTempDir();
+        var clean = Path.Combine(dir, "clean.txt");
+        var edited = Path.Combine(dir, "edited.txt");
+        var fresh = Path.Combine(dir, "new.txt");
+        VCLib.SetProvider(new SvnProvider());
+        VCLib.SetCommandRunner(CannedSvn(SvnStatusXml(
+            SvnEntry(clean, "normal"),
+            SvnEntry(edited, "modified"),
+            SvnEntry(fresh, "unversioned"))));
+        var statuses = VCLib.FileStatus([clean, edited, fresh]);
+        Assert.Equal("svn", statuses[0].System);
+        Assert.True(statuses[0].Tracked);
+        Assert.False(statuses[0].Dirty);
+        Assert.True(statuses[1].Tracked);
+        Assert.True(statuses[1].Dirty);
+        Assert.False(statuses[2].Tracked);
+        Assert.False(statuses[2].Dirty);
+    }
+
+    [Fact]
+    public void SvnStatusTreatsPropertyOnlyModificationAsDirty()
+    {
+        var file = Path.Combine(TestHelpers.MakeTempDir(), "props.txt");
+        VCLib.SetProvider(new SvnProvider());
+        VCLib.SetCommandRunner(CannedSvn(SvnStatusXml(SvnEntry(file, "normal", "modified"))));
+        var st = VCLib.FileStatus([file])[0];
+        Assert.True(st.Tracked);
+        Assert.True(st.Dirty);
+    }
+
+    [Fact]
+    public void SvnStatusReportsWritableOnlyForPathNotMentioned()
+    {
+        var dir = TestHelpers.MakeTempDir();
+        VCLib.SetProvider(new SvnProvider());
+        VCLib.SetCommandRunner(CannedSvn(SvnStatusXml(SvnEntry(Path.Combine(dir, "other.txt"), "normal"))));
+        var st = VCLib.FileStatus([Path.Combine(dir, "missing-from-output.txt")])[0];
+        Assert.Equal("svn", st.System);
+        Assert.Null(st.Tracked);
+        Assert.Null(st.Dirty);
+    }
+
+    // -- Plastic (canned `cm status --machinereadable` transcripts) -----------
+
+    /// <summary>A canned runner answering `cm status --machinereadable` with the given output.</summary>
+    private static Func<string, string[], CommandResult> CannedCm(string output) =>
+        (command, args) =>
+            command == "cm" && args.Length > 0 && args[0] == "status" && args.Contains("--machinereadable")
+                ? new CommandResult(0, output, "")
+                : new CommandResult(1, "", $"unexpected: {command} {string.Join(' ', args)}");
+
+    [Fact]
+    public void PlasticStatusClassifiesChangedCheckedOutPrivate()
+    {
+        var dir = TestHelpers.MakeTempDir();
+        var changed = Path.Combine(dir, "changed.txt");
+        var checkedOut = Path.Combine(dir, "checkedout.txt");
+        var priv = Path.Combine(dir, "new.txt");
+        VCLib.SetProvider(new PlasticProvider());
+        VCLib.SetCommandRunner(CannedCm(string.Join('\n',
+            "STATUS 23 /main rep:default@server",
+            $"CH \"{changed}\"",
+            $"CO \"{checkedOut}\"",
+            $"PR \"{priv}\"")));
+        var statuses = VCLib.FileStatus([changed, checkedOut, priv]);
+        Assert.Equal("plastic", statuses[0].System);
+        Assert.True(statuses[0].Tracked);
+        Assert.True(statuses[0].Dirty);
+        Assert.True(statuses[1].Dirty); // checked out = opened = pending local change
+        Assert.False(statuses[2].Tracked);
+        Assert.False(statuses[2].Dirty);
+    }
+
+    [Fact]
+    public void PlasticStatusTreatsUnlistedControlledFileAsClean()
+    {
+        var dir = TestHelpers.MakeTempDir();
+        var file = Path.Combine(dir, "clean.txt");
+        File.WriteAllText(file, "x");
+        VCLib.SetProvider(new PlasticProvider());
+        VCLib.SetCommandRunner(CannedCm("STATUS 1 /main rep:default@server"));
+        var st = VCLib.FileStatus([file])[0];
+        Assert.True(st.Tracked);
+        Assert.False(st.Dirty);
+    }
+
+    [Fact]
+    public void PlasticStatusParsesUnquotedPaths()
+    {
+        var file = Path.Combine(TestHelpers.MakeTempDir(), "changed.txt");
+        VCLib.SetProvider(new PlasticProvider());
+        VCLib.SetCommandRunner(CannedCm($"CH {file}"));
+        var st = VCLib.FileStatus([file])[0];
+        Assert.True(st.Dirty);
     }
 
     // -- filesystem fallback ---------------------------------------------------

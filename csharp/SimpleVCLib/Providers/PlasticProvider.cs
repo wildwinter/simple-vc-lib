@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace SimpleVCLib;
 
 /// <summary>
@@ -5,7 +7,7 @@ namespace SimpleVCLib;
 /// Uses the <c>cm</c> CLI (Plastic SCM command-line client).
 /// Files under Plastic SCM are read-only until checked out.
 /// </summary>
-public class PlasticProvider : IVCProvider
+public partial class PlasticProvider : IVCProvider
 {
     private static readonly FilesystemProvider _fs = new();
     public string Name => "plastic";
@@ -118,10 +120,91 @@ public class PlasticProvider : IVCProvider
 
     private static CommandRunner.Result Cm(string[] args) =>
         CommandRunner.Run("cm", args);
+
+    [GeneratedRegex("\"([^\"]*)\"")]
+    private static partial Regex QuotedPathRegex();
+
+    /// <summary>cm status codes for a controlled file with a pending change.</summary>
+    private static readonly HashSet<string> PlasticDirtyCodes =
+        ["CH", "CO", "AD", "CP", "RP", "MV", "DE", "LD", "LM"];
+    /// <summary>codes meaning the path is not under version control.</summary>
+    private static readonly HashSet<string> PlasticUntrackedCodes = ["PR", "IG"];
+
     /// <summary>
-    /// Status for a batch of files. Full Plastic reads (cm status / lock list) are TODO; reports the writable bit.
+    /// Status for a batch of files in ONE <c>cm status --machinereadable --all --ignored</c>
+    /// spawn. The machine format lists one item per line as
+    /// <c>&lt;2-letter code&gt; &lt;path&gt;</c> (absolute paths, quoted when they contain spaces).
+    /// <para>
+    /// Flag choice matters: <c>cm status</c> defaults to <c>--controlledchanged</c>, which
+    /// omits a content-modified-but-not-checked-out file (CH) and local deletes/moves.
+    /// <c>--all</c> adds changed + localdeleted + localmoved + private; <c>--ignored</c> adds
+    /// IG. Together they surface every dirty and every untracked item, so a not-listed file
+    /// can be read as clean-and-controlled. Lock owners and out-of-date remain TODO.
+    /// </para>
+    /// <para>
+    /// NOTE: status codes and flag semantics are validated against the Unity VCS CLI docs,
+    /// not a live workspace - worth one real smoke test on a Plastic install.
+    /// </para>
     /// </summary>
-    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths) =>
-        filePaths.Select(p => new VCFileStatus(
-            Path.GetFullPath(p), "plastic", FileStatusHelpers.WritableBit(p))).ToList();
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths)
+    {
+        var targets = filePaths.Select(Path.GetFullPath).ToArray();
+        var result = Cm(["status", "--machinereadable", "--all", "--ignored", .. targets]);
+        var byPath = new Dictionary<string, (bool Tracked, bool Dirty)>();
+        var byBase = new Dictionary<string, List<(bool Tracked, bool Dirty)>>();
+        if (result.ExitCode == 0 && result.Output.Length > 0)
+        {
+            foreach (var line in result.Output.Split('\n'))
+            {
+                var parsed = ParseCmStatusLine(line);
+                if (parsed is null) continue;
+                var (info, paths) = parsed.Value;
+                foreach (var p in paths)
+                {
+                    var abs = Path.GetFullPath(p);
+                    byPath[abs] = info;
+                    var baseName = Path.GetFileName(abs);
+                    if (!byBase.TryGetValue(baseName, out var list)) byBase[baseName] = list = [];
+                    list.Add(info);
+                }
+            }
+        }
+
+        return filePaths.Select(filePath =>
+        {
+            var abs = Path.GetFullPath(filePath);
+            var writable = FileStatusHelpers.WritableBit(abs);
+            if (!byPath.TryGetValue(abs, out var info))
+            {
+                if (byBase.TryGetValue(Path.GetFileName(abs), out var sameName) && sameName.Count == 1)
+                    info = sameName[0];
+                else if (File.Exists(abs))
+                    // Not listed by `cm status --all --ignored` = controlled, no pending change.
+                    return new VCFileStatus(abs, "plastic", writable, Tracked: true, Dirty: false);
+                else
+                    return new VCFileStatus(abs, "plastic", writable);
+            }
+            return new VCFileStatus(abs, "plastic", writable, Tracked: info.Tracked, Dirty: info.Dirty);
+        }).ToList();
+    }
+
+    /// <summary>
+    /// Parse one <c>cm status --machinereadable</c> line into a classification and the
+    /// path(s) it concerns. Returns null for header / blank / unrecognised lines.
+    /// A move (<c>MV "src" "dst"</c>) carries two quoted paths; both are flagged.
+    /// </summary>
+    private static ((bool Tracked, bool Dirty) Info, List<string> Paths)? ParseCmStatusLine(string line)
+    {
+        var trimmed = line.Trim();
+        var space = trimmed.IndexOf(' ');
+        if (space == -1) return null;
+        var code = trimmed[..space];
+        var dirty = PlasticDirtyCodes.Contains(code);
+        var untracked = PlasticUntrackedCodes.Contains(code);
+        if (!dirty && !untracked) return null; // STATUS header, blank, or unknown code
+        var rest = trimmed[(space + 1)..].Trim();
+        var quoted = QuotedPathRegex().Matches(rest).Select(m => m.Groups[1].Value).ToList();
+        var paths = quoted.Count > 0 ? quoted : [rest];
+        return ((!untracked, dirty), paths);
+    }
 }

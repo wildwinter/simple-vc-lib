@@ -42,9 +42,14 @@ export function runCommand(command, args, options = {}) {
 
   const exitCode = result.status ?? -1;
 
+  // Output is trimmed by default for convenience; pass { trim: false } when byte
+  // exactness matters (e.g. `git status -z`, whose first entry can begin with a
+  // significant space that trimming would strip).
+  const stdout = result.stdout ?? '';
+
   return {
     exitCode,
-    output: (result.stdout ?? '').trim(),
+    output: options.trim === false ? stdout : stdout.trim(),
     error: errText,
     timedOut: result.signal === 'SIGTERM' || result.signal === 'SIGKILL',
   };
