@@ -1,5 +1,5 @@
-import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, renameSync, constants } from 'fs';
-import { dirname, resolve, basename } from 'path';
+import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, renameSync, readFileSync, constants } from 'fs';
+import { dirname, resolve, basename, join } from 'path';
 import { runCommand, runCommandAsync } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { writableBit } from '../vcStatus.js';
@@ -255,18 +255,27 @@ export class GitProvider {
 
   /**
    * Status for a batch of files: per repository root, ONE
-   * `git status --porcelain -z` (tracked-ness) plus - when git-lfs is in play -
-   * ONE `git lfs locks --verify --json` (`--verify` splits ours vs theirs).
-   * git itself has no locks; lock-based git workflows are git-lfs locks.
+   * `git status --porcelain -z` (tracked-ness) plus - only when this repo uses
+   * git-lfs file locking AND `{ remote: true }` was asked - ONE
+   * `git lfs locks --verify --json` (`--verify` splits ours vs theirs).
+   *
+   * `git lfs locks` ALWAYS contacts the lock server (there is no local lock list),
+   * a network round-trip that can trigger a credential prompt (on Windows the
+   * GitHub sign-in window, #26). So a plain git repo - no LFS locking - never hits
+   * the network here, matching a lock-free git workflow's expectation, and even an
+   * LFS-locking repo only pays the round-trip when the caller opts in with `remote`.
+   * Lock use is detected locally by a `lockable` attribute in the repo's
+   * `.gitattributes`; git itself has no locks.
    *
    * All matching is done on REPO-RELATIVE paths (via `rev-parse --show-prefix`),
    * never by joining absolute paths - so symlinked ancestors (macOS `/var` ->
    * `/private/var`, `/tmp` -> `/private/tmp`) cannot break the lookup.
    *
    * @param {string[]} filePaths
+   * @param {import('../vcStatus.js').VCStatusOptions} [options]
    * @returns {import('../vcStatus.js').VCFileStatus[]}
    */
-  status(filePaths) {
+  status(filePaths, options = {}) {
     // Group by repository root (one rev-parse per unique directory, cached).
     const infoByDir = new Map();
     const groups = new Map();
@@ -285,7 +294,7 @@ export class GitProvider {
     for (const [root, files] of groups) {
       if (root === '(none)') { reportWritableOnly(files, byInput); continue; }
       const st = git(['status', '--porcelain', '-z', '--', ...files.map((f) => f.relKey)], root, { trim: false });
-      const locks = git(['lfs', 'locks', '--verify', '--json'], root);
+      const locks = shouldQueryLfsLocks(root, options) ? git(['lfs', 'locks', '--verify', '--json'], root) : NO_LOCKS;
       assembleGitStatuses(files, gitStates(st), gitLocks(locks), byInput);
     }
     return filePaths.map((filePath) => byInput.get(filePath));
@@ -293,9 +302,10 @@ export class GitProvider {
 
   /**
    * Async twin of {@link status}. Within each repo the porcelain status and the
-   * git-lfs lock list are independent, so they run concurrently.
+   * git-lfs lock list are independent, so they run concurrently - and the lock
+   * query is gated exactly as in {@link status} (LFS locking in use + `remote`).
    */
-  async statusAsync(filePaths) {
+  async statusAsync(filePaths, options = {}) {
     const infoByDir = new Map();
     const groups = new Map();
     for (const filePath of filePaths) {
@@ -314,11 +324,39 @@ export class GitProvider {
       if (root === '(none)') { reportWritableOnly(files, byInput); continue; }
       const [st, locks] = await Promise.all([
         gitAsync(['status', '--porcelain', '-z', '--', ...files.map((f) => f.relKey)], root, { trim: false }),
-        gitAsync(['lfs', 'locks', '--verify', '--json'], root),
+        shouldQueryLfsLocks(root, options)
+          ? gitAsync(['lfs', 'locks', '--verify', '--json'], root)
+          : Promise.resolve(NO_LOCKS),
       ]);
       assembleGitStatuses(files, gitStates(st), gitLocks(locks), byInput);
     }
     return filePaths.map((filePath) => byInput.get(filePath));
+  }
+}
+
+/** A no-op `git lfs locks` result: parsed by {@link gitLocks} as "no locks". */
+const NO_LOCKS = { exitCode: 1, output: '', error: '' };
+
+/**
+ * Whether to run `git lfs locks` for a repo: only when the caller opted into the
+ * network round-trip (`remote`) AND the repo actually uses LFS file locking.
+ * `git lfs locks` has no local mode - it always calls the lock server - so this
+ * gate is what keeps a lock-free git repo (the common case) entirely offline here.
+ */
+function shouldQueryLfsLocks(root, options) {
+  return options.remote === true && repoUsesLfsLocks(root);
+}
+
+/**
+ * True if the repo marks any path `lockable` in its root `.gitattributes` - the
+ * signal that an LFS file-locking workflow is in use. A cheap local file read; no
+ * spawn, no `git check-attr` per file.
+ */
+function repoUsesLfsLocks(root) {
+  try {
+    return /(^|\s)lockable(\s|$)/m.test(readFileSync(join(root, '.gitattributes'), 'utf8'));
+  } catch {
+    return false; // no .gitattributes (or unreadable) = not a lock-based repo
   }
 }
 

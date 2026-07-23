@@ -9,7 +9,7 @@ import {
   deleteFileAsync, renameFileAsync,
   setProvider, clearProvider,
   setCommandRunner, clearCommandRunner,
-  FilesystemProvider, PerforceProvider, SvnProvider, PlasticProvider,
+  FilesystemProvider, GitProvider, PerforceProvider, SvnProvider, PlasticProvider,
 } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
@@ -90,6 +90,53 @@ describe('fileStatus (git, real repository)', () => {
     const [st] = fileStatus([join(dir, 'tracked.txt')]);
     assert.isTrue(st.tracked);
     assert.isFalse(st.dirty);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fileStatus - git-lfs lock query gating (#26)
+//
+// `git lfs locks` always contacts the lock server (a remote round-trip that pops a
+// credential window on Windows). It must run ONLY when the repo uses LFS file
+// locking (a `lockable` .gitattributes entry) AND the caller passed { remote: true }.
+// GitProvider is forced via setProvider so no real .git is needed; a canned runner
+// records whether `git lfs locks` was ever invoked. The .gitattributes is a real
+// file, since the gate reads it directly (not through the command runner).
+// ---------------------------------------------------------------------------
+
+describe('fileStatus (git-lfs lock gating #26)', () => {
+  // Canned git: rev-parse points at `dir` (so the repo root is `dir`), status is
+  // clean, and `lfs locks` calls `onLfsLocks` so the test can see if it ran.
+  function cannedGit(dir, onLfsLocks) {
+    return (command, args) => {
+      if (command !== 'git') return { exitCode: 1, output: '', error: `unexpected: ${command}` };
+      const a = args[0] === '-C' ? args.slice(2) : args; // drop the leading -C <cwd>
+      if (a[0] === 'rev-parse') return { exitCode: 0, output: `${dir}\n\n`, error: '' };
+      if (a[0] === 'status') return { exitCode: 0, output: '', error: '' };
+      if (a[0] === 'lfs' && a[1] === 'locks') { onLfsLocks(); return { exitCode: 0, output: '{"ours":[],"theirs":[]}', error: '' }; }
+      return { exitCode: 0, output: '', error: '' };
+    };
+  }
+
+  function runGitStatus(dir, options, hasLockable) {
+    if (hasLockable) writeFileSync(join(dir, '.gitattributes'), '*.bin filter=lfs lockable\n');
+    let called = false;
+    setProvider(new GitProvider());
+    setCommandRunner(cannedGit(dir, () => { called = true; }));
+    fileStatus([join(dir, 'asset.bin')], options);
+    return called;
+  }
+
+  it('does NOT query lfs locks without { remote: true }, even in a lock-based repo', () => {
+    assert.isFalse(runGitStatus(makeTempDir(), {}, true));
+  });
+
+  it('does NOT query lfs locks with { remote: true } when the repo has no lockable attributes', () => {
+    assert.isFalse(runGitStatus(makeTempDir(), { remote: true }, false));
+  });
+
+  it('queries lfs locks only when the repo is lock-based AND { remote: true }', () => {
+    assert.isTrue(runGitStatus(makeTempDir(), { remote: true }, true));
   });
 });
 
