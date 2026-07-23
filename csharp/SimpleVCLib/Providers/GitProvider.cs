@@ -152,10 +152,18 @@ public class GitProvider : IVCProvider
         CommandRunner.RunAsync("git", ["-C", cwd, ..args], workingDirectory: cwd, trimOutput: trimOutput);
     /// <summary>
     /// Status for a batch of files: per repository root, ONE
-    /// <c>git status --porcelain -z</c> (tracked-ness) plus - when git-lfs is in
-    /// play - ONE <c>git lfs locks --verify --json</c> (<c>--verify</c> splits
-    /// ours vs theirs). git itself has no locks; lock-based git workflows are
-    /// git-lfs locks.
+    /// <c>git status --porcelain -z</c> (tracked-ness) plus - only when this repo
+    /// uses git-lfs file locking AND <paramref name="remote"/> is set - ONE
+    /// <c>git lfs locks --verify --json</c> (<c>--verify</c> splits ours vs theirs).
+    /// <para>
+    /// <c>git lfs locks</c> ALWAYS contacts the lock server (there is no local lock
+    /// list), a network round-trip that can trigger a credential prompt (on Windows
+    /// the GitHub sign-in window). So a plain git repo - no LFS locking - never hits
+    /// the network here, and even an LFS-locking repo pays the round-trip only when
+    /// the caller opts in with <paramref name="remote"/>. Lock use is detected
+    /// locally by a <c>lockable</c> attribute in the repo's <c>.gitattributes</c>;
+    /// git itself has no locks.
+    /// </para>
     /// <para>
     /// All matching is done on REPO-RELATIVE paths (via <c>rev-parse
     /// --show-prefix</c>), never by joining absolute paths - so symlinked
@@ -165,9 +173,6 @@ public class GitProvider : IVCProvider
     /// </summary>
     public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths, bool remote = false)
     {
-        // remote is ignored: git's one status + one lfs-locks call already carry
-        // everything git can report (git itself has no server-side lock/staleness).
-        _ = remote;
         var infoByDir = new Dictionary<string, (string? Root, string Prefix)>();
         var groups = new Dictionary<string, List<(string Input, string RelKey)>>();
         foreach (var filePath in filePaths)
@@ -187,7 +192,7 @@ public class GitProvider : IVCProvider
         {
             if (key == "(none)") { ReportGitWritableOnly(files, byInput); continue; }
             var st = Git(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], key, trimOutput: false);
-            var locks = Git(["lfs", "locks", "--verify", "--json"], key);
+            var locks = ShouldQueryLfsLocks(key, remote) ? Git(["lfs", "locks", "--verify", "--json"], key) : NoLocks;
             AssembleGitStatuses(files, GitStates(st), GitLocks(locks), byInput);
         }
         return filePaths.Select(p => byInput[p]).ToList();
@@ -195,11 +200,11 @@ public class GitProvider : IVCProvider
 
     /// <summary>
     /// Async twin of <see cref="Status"/>. Within each repo the porcelain status and the
-    /// git-lfs lock list are independent, so they run concurrently.
+    /// git-lfs lock list are independent, so they run concurrently - and the lock query
+    /// is gated exactly as in <see cref="Status"/> (LFS locking in use + remote).
     /// </summary>
     public async Task<IReadOnlyList<VCFileStatus>> StatusAsync(IReadOnlyList<string> filePaths, bool remote = false)
     {
-        _ = remote;
         var infoByDir = new Dictionary<string, (string? Root, string Prefix)>();
         var groups = new Dictionary<string, List<(string Input, string RelKey)>>();
         foreach (var filePath in filePaths)
@@ -219,7 +224,9 @@ public class GitProvider : IVCProvider
         {
             if (key == "(none)") { ReportGitWritableOnly(files, byInput); continue; }
             var stTask = GitAsync(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], key, trimOutput: false);
-            var locksTask = GitAsync(["lfs", "locks", "--verify", "--json"], key);
+            var locksTask = ShouldQueryLfsLocks(key, remote)
+                ? GitAsync(["lfs", "locks", "--verify", "--json"], key)
+                : Task.FromResult(NoLocks);
             await Task.WhenAll(stTask, locksTask).ConfigureAwait(false);
             AssembleGitStatuses(files, GitStates(stTask.Result), GitLocks(locksTask.Result), byInput);
         }
@@ -261,6 +268,38 @@ public class GitProvider : IVCProvider
                 states[entry[3..]] = entry[..2];
             }
         return states;
+    }
+
+    /// <summary>A no-op `git lfs locks` result: parsed by <see cref="GitLocks"/> as "no locks".</summary>
+    private static readonly CommandRunner.Result NoLocks = new(1, "", "");
+
+    /// <summary>
+    /// Whether to run `git lfs locks` for a repo: only when the caller opted into the
+    /// network round-trip (<paramref name="remote"/>) AND the repo actually uses LFS
+    /// file locking. `git lfs locks` has no local mode - it always calls the lock
+    /// server - so this gate is what keeps a lock-free git repo (the common case)
+    /// entirely offline here.
+    /// </summary>
+    private static bool ShouldQueryLfsLocks(string root, bool remote) => remote && RepoUsesLfsLocks(root);
+
+    /// <summary>
+    /// True if the repo marks any path <c>lockable</c> in its root <c>.gitattributes</c> -
+    /// the signal that an LFS file-locking workflow is in use. A cheap local file read;
+    /// no spawn, no <c>git check-attr</c> per file.
+    /// </summary>
+    private static bool RepoUsesLfsLocks(string root)
+    {
+        try
+        {
+            foreach (var line in File.ReadAllText(Path.Combine(root, ".gitattributes")).Split('\n'))
+                foreach (var tok in line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+                    if (tok == "lockable") return true;
+            return false;
+        }
+        catch
+        {
+            return false; // no .gitattributes (or unreadable) = not a lock-based repo
+        }
     }
 
     /// <summary>`git lfs locks --verify --json` -> (ours, theirs).</summary>

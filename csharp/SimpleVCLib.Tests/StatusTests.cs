@@ -98,6 +98,51 @@ public class StatusTests : IDisposable
         Assert.False(st.Dirty);
     }
 
+    // -- git-lfs lock query gating (#26) --------------------------------------
+    //
+    // `git lfs locks` always contacts the lock server (a remote round-trip that pops a
+    // credential window on Windows). It must run ONLY when the repo uses LFS file
+    // locking (a `lockable` .gitattributes entry) AND remote was requested. GitProvider
+    // is forced via SetProvider so no real .git is needed; a canned runner records
+    // whether `git lfs locks` was ever invoked. The .gitattributes is a real file, since
+    // the gate reads it directly (not through the command runner). Mirrors js/test.
+
+    /// <summary>Canned git: rev-parse points at <paramref name="dir"/> (repo root = dir),
+    /// status is clean, and `lfs locks` flips <paramref name="calledLfsLocks"/>.</summary>
+    private static Func<string, string[], CommandResult> CannedGit(string dir, Action onLfsLocks) =>
+        (command, args) =>
+        {
+            if (command != "git") return new CommandResult(1, "", $"unexpected: {command}");
+            var a = args.Length >= 2 && args[0] == "-C" ? args[2..] : args; // drop leading -C <cwd>
+            if (a.Length > 0 && a[0] == "rev-parse") return new CommandResult(0, $"{dir}\n\n", "");
+            if (a.Length > 0 && a[0] == "status") return new CommandResult(0, "", "");
+            if (a.Length > 1 && a[0] == "lfs" && a[1] == "locks") { onLfsLocks(); return new CommandResult(0, "{\"ours\":[],\"theirs\":[]}", ""); }
+            return new CommandResult(0, "", "");
+        };
+
+    private static bool RunGitStatusQueriedLocks(bool remote, bool hasLockable)
+    {
+        var dir = TestHelpers.MakeTempDir();
+        if (hasLockable) File.WriteAllText(Path.Combine(dir, ".gitattributes"), "*.bin filter=lfs lockable\n");
+        var called = false;
+        VCLib.SetProvider(new GitProvider());
+        VCLib.SetCommandRunner(CannedGit(dir, () => called = true));
+        VCLib.FileStatus([Path.Combine(dir, "asset.bin")], remote: remote);
+        return called;
+    }
+
+    [Fact]
+    public void GitLfsLocksNotQueriedWithoutRemoteEvenInLockBasedRepo() =>
+        Assert.False(RunGitStatusQueriedLocks(remote: false, hasLockable: true));
+
+    [Fact]
+    public void GitLfsLocksNotQueriedWithRemoteWhenNoLockableAttributes() =>
+        Assert.False(RunGitStatusQueriedLocks(remote: true, hasLockable: false));
+
+    [Fact]
+    public void GitLfsLocksQueriedOnlyWhenLockBasedAndRemote() =>
+        Assert.True(RunGitStatusQueriedLocks(remote: true, hasLockable: true));
+
     // -- Perforce (canned -ztag fstat transcripts) ----------------------------
 
     [Fact]
