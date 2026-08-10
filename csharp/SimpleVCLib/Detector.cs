@@ -14,8 +14,29 @@ public static class Detector
     // Populated on first detection; avoids repeated directory walks for the same repo.
     private static readonly Dictionary<string, IVCProvider> _rootCache = new();
 
+    /// <summary>
+    /// Directories whose answer needed the Perforce probe: the ones with no
+    /// marker directory anywhere above them.
+    /// <para>
+    /// The root cache above only ever learns the POSITIVE answers, so a path
+    /// outside any working copy was re-walked and re-probed on every call, and
+    /// the probe is a `p4 info` subprocess. A tool that autosaves paid one per
+    /// write. Nothing about that answer changes between two keystrokes.
+    /// </para>
+    /// <para>
+    /// Keyed by the EXACT starting directory and never consulted for ancestors,
+    /// unlike the root cache: "no marker above this directory" says nothing
+    /// about a repository nested somewhere below it.
+    /// </para>
+    /// </summary>
+    private static readonly Dictionary<string, IVCProvider> _probedCache = new();
+
     /// <summary>Clear the detection cache. Called when the provider override is cleared.</summary>
-    public static void ClearCache() => _rootCache.Clear();
+    public static void ClearCache()
+    {
+        _rootCache.Clear();
+        _probedCache.Clear();
+    }
 
     /// <summary>
     /// Detect and return the appropriate provider for <paramref name="path"/>.
@@ -54,6 +75,8 @@ public static class Detector
             if (parent == dir) break;
             dir = parent;
         }
+
+        if (startDir is not null && _probedCache.TryGetValue(startDir, out var probed)) return probed;
 
         // Check whether any ancestor is a known VCS root before doing any I/O.
         dir = startDir;
@@ -98,10 +121,11 @@ public static class Detector
 
         // Perforce has no marker directory — detect via CLI.
         var p4 = CommandRunner.Run("p4", ["info"], timeoutMs: 3000);
-        if (p4.ExitCode == 0 && p4.Output.Contains("Client name:"))
-            return new PerforceProvider();
-
-        return new FilesystemProvider();
+        IVCProvider answer = (p4.ExitCode == 0 && p4.Output.Contains("Client name:"))
+            ? new PerforceProvider()
+            : new FilesystemProvider();
+        if (startDir is not null) _probedCache[startDir] = answer;
+        return answer;
     }
 
     // -------------------------------------------------------------------------

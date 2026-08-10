@@ -1,5 +1,5 @@
 import { existsSync, accessSync, chmodSync, statSync, unlinkSync, rmSync, renameSync, readFileSync, constants } from 'fs';
-import { dirname, resolve, basename, join } from 'path';
+import { dirname, resolve, basename, join, sep } from 'path';
 import { runCommand, runCommandAsync } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { writableBit } from '../vcStatus.js';
@@ -42,16 +42,66 @@ function gitArgv(args, cwd) {
 }
 
 /**
+ * Paths git has told us are in the index.
+ *
+ * POSITIVES ONLY, and that asymmetry is the whole design. A file that git
+ * reports as tracked stays tracked for the life of the process unless somebody
+ * runs `git rm` behind us, which is rare, external, and costs nothing worse
+ * than a `git add` we did not need. An UNTRACKED file, by contrast, becomes
+ * tracked the moment the next `finishedWrite` adds it, so caching that answer
+ * would be wrong within milliseconds.
+ *
+ * Why it is here at all: `finishedWrite` runs on every write, and a tool that
+ * autosaves - which is what this library is for - was paying a `git ls-files`
+ * SPAWN per keystroke-triggered save. Measured at ~11ms on a warm macOS, which
+ * is the difference between an editor that feels immediate and one that does
+ * not, and it dwarfed everything else that save did.
+ */
+const _trackedCache = new Set();
+
+/** Forget which paths are tracked. For a test, or a working copy that has been
+ *  rearranged underneath a long-running process. */
+export function clearTrackedCache() {
+  _trackedCache.clear();
+}
+
+/**
  * Returns true if the file is tracked by git (exists in the index).
  */
 function isTracked(filePath) {
+  const key = resolve(filePath);
+  if (_trackedCache.has(key)) return true;
   const result = git(['ls-files', '--error-unmatch', filePath], dirname(filePath));
+  if (result.exitCode === 0) _trackedCache.add(key);
   return result.exitCode === 0;
 }
 
 async function isTrackedAsync(filePath) {
+  const key = resolve(filePath);
+  if (_trackedCache.has(key)) return true;
   const result = await gitAsync(['ls-files', '--error-unmatch', filePath], dirname(filePath));
+  if (result.exitCode === 0) _trackedCache.add(key);
   return result.exitCode === 0;
+}
+
+/** A successful `git add` puts the path in the index, so record it rather than
+ *  asking again on the next write. */
+function markTracked(filePath) {
+  _trackedCache.add(resolve(filePath));
+}
+
+/** A path this library has just taken OUT of the index (`git rm`, the old half
+ *  of a `git mv`). The one way a positive can stop being true without an
+ *  external command, so it is the one place the cache must be corrected. */
+function unmarkTracked(filePath) {
+  _trackedCache.delete(resolve(filePath));
+}
+
+/** Everything under this folder leaves the index together (`git rm -r`). */
+function unmarkTrackedUnder(folderPath) {
+  const prefix = resolve(folderPath) + sep;
+  for (const path of _trackedCache) if (path.startsWith(prefix)) _trackedCache.delete(path);
+  _trackedCache.delete(resolve(folderPath));
 }
 
 /**
@@ -94,7 +144,7 @@ export class GitProvider {
       return fs.finishedWrite(filePath);
 
     const result = git(['add', filePath], cwd);
-    if (result.exitCode === 0) return okResult('File added to git');
+    if (result.exitCode === 0) { markTracked(filePath); return okResult('File added to git'); }
     // File is ignored by .gitignore — treat as outside the repo.
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('ignored')) return fs.finishedWrite(filePath);
@@ -115,7 +165,7 @@ export class GitProvider {
       return fs.finishedWriteAsync(filePath);
 
     const result = await gitAsync(['add', filePath], cwd);
-    if (result.exitCode === 0) return okResult('File added to git');
+    if (result.exitCode === 0) { markTracked(filePath); return okResult('File added to git'); }
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('ignored')) return fs.finishedWriteAsync(filePath);
     return errorResult('error', `Cannot add '${filePath}' to git: ${result.error || result.output}`);
@@ -126,7 +176,7 @@ export class GitProvider {
     if (!existsSync(filePath)) return okResult();
     if (await isTrackedAsync(filePath)) {
       const result = await gitAsync(['rm', '--force', filePath], dirname(filePath));
-      if (result.exitCode === 0) return okResult();
+      if (result.exitCode === 0) { unmarkTracked(filePath); return okResult(); }
       return errorResult('error', `Cannot delete '${filePath}' from git: ${result.error || result.output}`);
     }
     try {
@@ -143,6 +193,7 @@ export class GitProvider {
     const listResult = await gitAsync(['ls-files', folderPath], folderPath);
     if (listResult.exitCode === 0 && listResult.output.length > 0) {
       const rmResult = await gitAsync(['rm', '-r', '--force', folderPath], folderPath);
+      if (rmResult.exitCode === 0) unmarkTrackedUnder(folderPath);
       if (rmResult.exitCode !== 0)
         return errorResult('error', `Cannot delete folder '${folderPath}' from git: ${rmResult.error || rmResult.output}`);
     }
@@ -161,7 +212,7 @@ export class GitProvider {
     if (!existsSync(oldPath)) return okResult();
     if (await isTrackedAsync(oldPath)) {
       const result = await gitAsync(['mv', oldPath, newPath], dirname(oldPath));
-      if (result.exitCode === 0) return okResult();
+      if (result.exitCode === 0) { unmarkTracked(oldPath); markTracked(newPath); return okResult(); }
       return errorResult('error', `Cannot rename '${oldPath}' in git: ${result.error || result.output}`);
     }
     try {
@@ -176,6 +227,9 @@ export class GitProvider {
   async renameFolderAsync(oldPath, newPath) {
     if (!existsSync(oldPath)) return okResult();
     const result = await gitAsync(['mv', oldPath, newPath], dirname(oldPath));
+    // Every path underneath has moved; forget the subtree rather than guess at
+    // the new names. They cost one `ls-files` each, once.
+    unmarkTrackedUnder(oldPath);
     if (result.exitCode === 0) return okResult();
     try {
       renameSync(oldPath, newPath);
@@ -190,7 +244,7 @@ export class GitProvider {
 
     if (isTracked(filePath)) {
       const result = git(['rm', '--force', filePath], dirname(filePath));
-      if (result.exitCode === 0) return okResult();
+      if (result.exitCode === 0) { unmarkTracked(filePath); return okResult(); }
       return errorResult('error', `Cannot delete '${filePath}' from git: ${result.error || result.output}`);
     }
 
@@ -206,7 +260,7 @@ export class GitProvider {
     if (!existsSync(oldPath)) return okResult();
     if (isTracked(oldPath)) {
       const result = git(['mv', oldPath, newPath], dirname(oldPath));
-      if (result.exitCode === 0) return okResult();
+      if (result.exitCode === 0) { unmarkTracked(oldPath); markTracked(newPath); return okResult(); }
       return errorResult('error', `Cannot rename '${oldPath}' in git: ${result.error || result.output}`);
     }
     try {
@@ -220,6 +274,9 @@ export class GitProvider {
   renameFolder(oldPath, newPath) {
     if (!existsSync(oldPath)) return okResult();
     const result = git(['mv', oldPath, newPath], dirname(oldPath));
+    // Every path underneath has moved; forget the subtree rather than guess at
+    // the new names. They cost one `ls-files` each, once.
+    unmarkTrackedUnder(oldPath);
     if (result.exitCode === 0) return okResult();
     // Fall back to filesystem rename for untracked folders.
     try {
@@ -236,6 +293,7 @@ export class GitProvider {
     const listResult = git(['ls-files', folderPath], folderPath);
     if (listResult.exitCode === 0 && listResult.output.length > 0) {
       const rmResult = git(['rm', '-r', '--force', folderPath], folderPath);
+      if (rmResult.exitCode === 0) unmarkTrackedUnder(folderPath);
       if (rmResult.exitCode !== 0) {
         return errorResult('error', `Cannot delete folder '${folderPath}' from git: ${rmResult.error || rmResult.output}`);
       }

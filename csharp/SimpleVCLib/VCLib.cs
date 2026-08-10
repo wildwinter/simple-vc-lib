@@ -27,6 +27,23 @@ public static class VCLib
     {
         _overrideProvider = null;
         Detector.ClearCache();
+        GitProvider.ClearTrackedCache();
+    }
+
+    /// <summary>
+    /// Forget everything cached about the working copy: which VCS is where, and
+    /// which paths git has in its index.
+    /// <para>
+    /// Both are answered once and remembered, because a tool that autosaves asks
+    /// them on every write and each answer costs a subprocess. Call this when the
+    /// ground moves - a different project opened, a working copy re-cloned -
+    /// rather than relying on process lifetime.
+    /// </para>
+    /// </summary>
+    public static void ClearVcCaches()
+    {
+        Detector.ClearCache();
+        GitProvider.ClearTrackedCache();
     }
 
     /// <summary>
@@ -118,7 +135,10 @@ public static class VCLib
                 // If the file can't be read, fall through to the normal write path.
             }
         }
-        var prep = GetProvider(filePath).PrepareToWrite(filePath);
+        // One resolution for both halves of the write: it is the same question,
+        // and asking twice was two directory walks (and once, two `p4 info` runs).
+        var provider = GetProvider(filePath);
+        var prep = provider.PrepareToWrite(filePath);
         if (!prep.Success) return prep;
         try
         {
@@ -128,7 +148,7 @@ public static class VCLib
         {
             return VCResult.Error(e.Message);
         }
-        return GetProvider(filePath).FinishedWrite(filePath);
+        return provider.FinishedWrite(filePath);
     }
 
     /// <summary>
@@ -159,7 +179,10 @@ public static class VCLib
                 // If the file can't be read, fall through to the normal write path.
             }
         }
-        var prep = GetProvider(filePath).PrepareToWrite(filePath);
+        // One resolution for both halves of the write: it is the same question,
+        // and asking twice was two directory walks (and once, two `p4 info` runs).
+        var provider = GetProvider(filePath);
+        var prep = provider.PrepareToWrite(filePath);
         if (!prep.Success) return prep;
         try
         {
@@ -169,7 +192,7 @@ public static class VCLib
         {
             return VCResult.Error(e.Message);
         }
-        return GetProvider(filePath).FinishedWrite(filePath);
+        return provider.FinishedWrite(filePath);
     }
     /// <summary>
     /// Write a batch of text files through VC, creating parent directories, and
@@ -221,7 +244,9 @@ public static class VCLib
             }
             catch { /* unreadable - fall through to the normal write path */ }
         }
-        var prep = await GetProvider(filePath).PrepareToWriteAsync(filePath).ConfigureAwait(false);
+        // One resolution for both halves; see the sync twin.
+        var provider = GetProvider(filePath);
+        var prep = await provider.PrepareToWriteAsync(filePath).ConfigureAwait(false);
         if (!prep.Success) return prep;
         try
         {
@@ -231,7 +256,7 @@ public static class VCLib
         {
             return VCResult.Error(e.Message);
         }
-        return await GetProvider(filePath).FinishedWriteAsync(filePath).ConfigureAwait(false);
+        return await provider.FinishedWriteAsync(filePath).ConfigureAwait(false);
     }
 
     /// <summary>Async twin of <see cref="WriteBinaryFile"/>.</summary>
@@ -246,7 +271,9 @@ public static class VCLib
             }
             catch { /* unreadable - fall through to the normal write path */ }
         }
-        var prep = await GetProvider(filePath).PrepareToWriteAsync(filePath).ConfigureAwait(false);
+        // One resolution for both halves; see the sync twin.
+        var provider = GetProvider(filePath);
+        var prep = await provider.PrepareToWriteAsync(filePath).ConfigureAwait(false);
         if (!prep.Success) return prep;
         try
         {
@@ -256,7 +283,7 @@ public static class VCLib
         {
             return VCResult.Error(e.Message);
         }
-        return await GetProvider(filePath).FinishedWriteAsync(filePath).ConfigureAwait(false);
+        return await provider.FinishedWriteAsync(filePath).ConfigureAwait(false);
     }
 
     /// <summary>

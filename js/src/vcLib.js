@@ -3,7 +3,7 @@ import { statSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs
 import { writeFile, readFile, mkdir } from 'fs/promises';
 import { loadConfig } from './config.js';
 import { detectProvider, clearDetectorCache } from './detector.js';
-import { GitProvider } from './providers/gitProvider.js';
+import { GitProvider, clearTrackedCache } from './providers/gitProvider.js';
 import { PerforceProvider } from './providers/perforceProvider.js';
 import { PlasticProvider } from './providers/plasticProvider.js';
 import { SvnProvider } from './providers/svnProvider.js';
@@ -35,6 +35,21 @@ export function setProvider(provider) {
 export function clearProvider() {
   _overrideProvider = null;
   clearDetectorCache();
+  clearTrackedCache();
+}
+
+/**
+ * Forget everything cached about the working copy: which VCS is where, and
+ * which paths git has in its index.
+ *
+ * A long-running tool should call this when the ground moves underneath it - a
+ * project closed and another opened, a working copy re-cloned - rather than
+ * relying on process lifetime. Both caches are safe to lose: the next question
+ * asks the VCS again.
+ */
+export function clearVcCaches() {
+  clearDetectorCache();
+  clearTrackedCache();
 }
 
 function dirOf(p) {
@@ -168,14 +183,17 @@ export function writeTextFile(filePath, content, encoding = 'utf8', forceWrite =
       // If the file can't be read, fall through to the normal write path.
     }
   }
-  const prep = resolveProvider(filePath).prepareToWrite(filePath);
+  // One resolution for both halves of the write: it is the same question,
+  // and asking twice was two directory walks (and once, two `p4 info` spawns).
+  const provider = resolveProvider(filePath);
+  const prep = provider.prepareToWrite(filePath);
   if (!prep.success) return prep;
   try {
     writeFileSync(filePath, content, { encoding });
   } catch (e) {
     return { success: false, status: 'error', message: e.message };
   }
-  return resolveProvider(filePath).finishedWrite(filePath);
+  return provider.finishedWrite(filePath);
 }
 
 /**
@@ -203,14 +221,17 @@ export function writeBinaryFile(filePath, data, forceWrite = false) {
       // If the file can't be read, fall through to the normal write path.
     }
   }
-  const prep = resolveProvider(filePath).prepareToWrite(filePath);
+  // One resolution for both halves of the write: it is the same question,
+  // and asking twice was two directory walks (and once, two `p4 info` spawns).
+  const provider = resolveProvider(filePath);
+  const prep = provider.prepareToWrite(filePath);
   if (!prep.success) return prep;
   try {
     writeFileSync(filePath, data);
   } catch (e) {
     return { success: false, status: 'error', message: e.message };
   }
-  return resolveProvider(filePath).finishedWrite(filePath);
+  return provider.finishedWrite(filePath);
 }
 
 /**
@@ -264,14 +285,16 @@ export async function writeTextFileAsync(filePath, content, encoding = 'utf8', f
       // If the file can't be read, fall through to the normal write path.
     }
   }
-  const prep = await resolveProvider(filePath).prepareToWriteAsync(filePath);
+  // One resolution for both halves; see the sync twin.
+  const provider = resolveProvider(filePath);
+  const prep = await provider.prepareToWriteAsync(filePath);
   if (!prep.success) return prep;
   try {
     await writeFile(filePath, content, { encoding });
   } catch (e) {
     return { success: false, status: 'error', message: e.message };
   }
-  return resolveProvider(filePath).finishedWriteAsync(filePath);
+  return provider.finishedWriteAsync(filePath);
 }
 
 /**
@@ -291,14 +314,16 @@ export async function writeBinaryFileAsync(filePath, data, forceWrite = false) {
       // If the file can't be read, fall through to the normal write path.
     }
   }
-  const prep = await resolveProvider(filePath).prepareToWriteAsync(filePath);
+  // One resolution for both halves; see the sync twin.
+  const provider = resolveProvider(filePath);
+  const prep = await provider.prepareToWriteAsync(filePath);
   if (!prep.success) return prep;
   try {
     await writeFile(filePath, data);
   } catch (e) {
     return { success: false, status: 'error', message: e.message };
   }
-  return resolveProvider(filePath).finishedWriteAsync(filePath);
+  return provider.finishedWriteAsync(filePath);
 }
 
 /**

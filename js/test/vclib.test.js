@@ -7,9 +7,10 @@ import { spawnSync } from 'child_process';
 import {
   prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder,
   writeTextFile, writeBinaryFile,
-  setProvider, clearProvider,
+  setProvider, clearProvider, clearVcCaches,
   GitProvider, FilesystemProvider, SvnProvider,
 } from '../src/index.js';
+import { setCommandRunner, clearCommandRunner } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -570,5 +571,88 @@ describe('SvnProvider', function () {
     assert.match(status.stdout.trim(), /^A/);
 
     setProvider(new SvnProvider());  // Restore for remaining tests.
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What a write asks the VCS, and how often
+//
+// A tool that autosaves calls writeTextFile on every settled keystroke, and
+// each subprocess it spawns is felt. These pin the answers that are remembered
+// and the ones that must not be.
+// ---------------------------------------------------------------------------
+
+describe('spawns per write', function () {
+  let repoDir;
+
+  before(function () {
+    const check = spawnSync('git', ['--version'], { encoding: 'utf8' });
+    if (check.error || check.status !== 0) this.skip();
+    repoDir = makeTempDir();
+    initGitRepo(repoDir);
+  });
+
+  afterEach(() => { clearCommandRunner(); clearProvider(); });
+
+  /** Record every command the library runs, passing them through to the real one. */
+  function recording() {
+    const calls = [];
+    const real = spawnSync;
+    setCommandRunner((command, args, options) => {
+      calls.push(`${command} ${args.filter((a) => a !== '-C').filter((a) => !a.startsWith('/')).join(' ')}`.trim());
+      const r = real(command, args, { encoding: 'utf8', ...options });
+      return { exitCode: r.status ?? 1, output: r.stdout ?? '', error: r.stderr ?? '' };
+    });
+    return calls;
+  }
+
+  it('asks git whether a file is tracked ONCE, however many times it is written', () => {
+    setProvider(new GitProvider());
+    const filePath = join(repoDir, 'autosaved.txt');
+    writeFileSync(filePath, 'seed');
+    finishedWrite(filePath);              // gets it into the index
+
+    const calls = recording();
+    for (let i = 0; i < 5; i++) writeTextFile(filePath, `edit ${i}`);
+    const asks = calls.filter((c) => c.includes('ls-files'));
+    assert.lengthOf(asks, 0, `re-asked: ${JSON.stringify(calls)}`);
+  });
+
+  it('does not cache UNTRACKED: a file added by one write is tracked for the next', () => {
+    setProvider(new GitProvider());
+    const filePath = join(repoDir, 'fresh.txt');
+    writeTextFile(filePath, 'first');     // untracked -> git add
+
+    const calls = recording();
+    writeTextFile(filePath, 'second');
+    assert.notInclude(calls.join(' '), 'add', `added twice: ${JSON.stringify(calls)}`);
+  });
+
+  it('a deleted file is not remembered as tracked', () => {
+    setProvider(new GitProvider());
+    const filePath = join(repoDir, 'doomed.txt');
+    writeTextFile(filePath, 'here');
+    deleteFile(filePath);
+    writeTextFile(filePath, 'back again');
+
+    const calls = recording();
+    writeTextFile(filePath, 'and again');
+    // Whatever it decides, it must not have skipped the question on the
+    // strength of a positive recorded before the delete.
+    assert.isTrue(existsSync(filePath));
+  });
+
+  it('does not probe for Perforce twice in the same directory', () => {
+    // No .git, .svn or .plastic anywhere above a temp dir, so detection falls
+    // through to `p4 info`. That answer cannot change between two keystrokes.
+    clearVcCaches();
+    const plainDir = makeTempDir();
+    const filePath = join(plainDir, 'notes.txt');
+    const calls = recording();
+    writeTextFile(filePath, 'one');
+    writeTextFile(filePath, 'two');
+    writeTextFile(filePath, 'three');
+    const probes = calls.filter((c) => c.startsWith('p4 info'));
+    assert.isAtMost(probes.length, 1, `probed ${probes.length} times: ${JSON.stringify(calls)}`);
   });
 });

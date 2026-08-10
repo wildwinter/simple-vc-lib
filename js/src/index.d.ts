@@ -279,6 +279,17 @@ export declare function fileStatusAsync(filePaths: string[], options?: VCStatusO
  */
 export declare function setCommandRunner(runner: ((command: string, args: string[], options?: object) => { exitCode: number; output: string; error: string; timedOut?: boolean }) | null): void;
 
+/**
+ * Forget everything cached about the working copy: which VCS is where, and
+ * which paths git has in its index.
+ *
+ * Both are answered once and remembered, because a tool that autosaves asks
+ * them on every write and each answer costs a subprocess. Call this when the
+ * ground moves - a different project opened, a working copy re-cloned - rather
+ * than relying on process lifetime.
+ */
+export declare function clearVcCaches(): void;
+
 /** Clear any previously set command-runner override. */
 export declare function clearCommandRunner(): void;
 

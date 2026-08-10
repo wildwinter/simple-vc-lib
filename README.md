@@ -277,6 +277,39 @@ VCLib.ClearProvider();                // Restore auto-detection
 
 Available provider classes: `GitProvider`, `PerforceProvider`, `PlasticProvider`, `SvnProvider`, `FilesystemProvider`.
 
+### What is Remembered, and How to Forget It
+
+Two answers are cached for the life of the process, because a tool that
+autosaves asks them on every single write and each one otherwise costs a
+subprocess:
+
+- **Which VCS a directory belongs to.** Marker directories (`.git`, `.svn`,
+  `.plastic`) were already remembered. Their ABSENCE is now remembered too,
+  which matters more: with no marker to find, detection falls through to
+  `p4 info`, and that is a process spawn per write for every project outside a
+  working copy.
+- **Which paths git has in its index.** `finishedWrite` asks
+  `git ls-files --error-unmatch` to decide whether a `git add` is needed.
+  Positive answers only: a file that becomes tracked stays tracked, but an
+  untracked one is a moving target and is re-asked every time.
+
+The library keeps both correct through its own operations - a `git rm` or a
+`git mv` updates what is remembered. Only a change made OUTSIDE it can make a
+cached answer stale, so there is one call to drop both:
+
+**Javascript:**
+```javascript
+import { clearVcCaches } from '@wildwinter/simple-vc-lib';
+clearVcCaches();   // a different project opened, a working copy re-cloned
+```
+
+**C#:**
+```csharp
+VCLib.ClearVcCaches();
+```
+
+`clearProvider()` / `VCLib.ClearProvider()` clear them too.
+
 ### Overriding Command Execution (for tests)
 Every CLI call goes through a single command runner, and you can override it — the same pattern as `setProvider`. This lets tests feed **canned CLI output** to the providers, so logic like the Perforce `fstat` parsing is unit-testable on machines with no `p4` installed (and no live workspace):
 

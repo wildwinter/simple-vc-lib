@@ -31,7 +31,7 @@ public class GitProvider : IVCProvider
             return _fs.FinishedWrite(filePath);
 
         var result = Git(["add", filePath], cwd);
-        if (result.ExitCode == 0) return VCResult.Ok("File added to git");
+        if (result.ExitCode == 0) { MarkTracked(filePath); return VCResult.Ok("File added to git"); }
         // File is ignored by .gitignore — treat as outside the repo.
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
         if (combined.Contains("ignored")) return _fs.FinishedWrite(filePath);
@@ -53,7 +53,7 @@ public class GitProvider : IVCProvider
             return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
 
         var result = await GitAsync(["add", filePath], cwd).ConfigureAwait(false);
-        if (result.ExitCode == 0) return VCResult.Ok("File added to git");
+        if (result.ExitCode == 0) { MarkTracked(filePath); return VCResult.Ok("File added to git"); }
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
         if (combined.Contains("ignored")) return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
         return VCResult.Error($"Cannot add '{filePath}' to git: {result.Error ?? result.Output}");
@@ -73,7 +73,7 @@ public class GitProvider : IVCProvider
         if (IsTracked(filePath))
         {
             var result = Git(["rm", "--force", filePath], Path.GetDirectoryName(filePath)!);
-            if (result.ExitCode == 0) return VCResult.Ok();
+            if (result.ExitCode == 0) { UnmarkTracked(filePath); return VCResult.Ok(); }
             return VCResult.Error($"Cannot delete '{filePath}' from git: {result.Error ?? result.Output}");
         }
 
@@ -88,6 +88,7 @@ public class GitProvider : IVCProvider
         if (listResult.ExitCode == 0 && !string.IsNullOrWhiteSpace(listResult.Output))
         {
             var rmResult = Git(["rm", "-r", "--force", folderPath], folderPath);
+            if (rmResult.ExitCode == 0) UnmarkTrackedUnder(folderPath);
             if (rmResult.ExitCode != 0)
                 return VCResult.Error($"Cannot delete folder '{folderPath}' from git: {rmResult.Error ?? rmResult.Output}");
         }
@@ -105,7 +106,7 @@ public class GitProvider : IVCProvider
         if (IsTracked(oldPath))
         {
             var result = Git(["mv", oldPath, newPath], Path.GetDirectoryName(oldPath)!);
-            if (result.ExitCode == 0) return VCResult.Ok();
+            if (result.ExitCode == 0) { UnmarkTracked(oldPath); MarkTracked(newPath); return VCResult.Ok(); }
             return VCResult.Error($"Cannot rename '{oldPath}' in git: {result.Error ?? result.Output}");
         }
         return _fs.RenameFile(oldPath, newPath);
@@ -115,6 +116,9 @@ public class GitProvider : IVCProvider
     {
         if (!Directory.Exists(oldPath)) return VCResult.Ok();
         var result = Git(["mv", oldPath, newPath], Path.GetDirectoryName(oldPath)!);
+        // Every path underneath has moved; forget the subtree rather than guess
+        // at the new names. They cost one `ls-files` each, once.
+        UnmarkTrackedUnder(oldPath);
         if (result.ExitCode == 0) return VCResult.Ok();
         // Fall back to filesystem rename for untracked folders.
         return _fs.RenameFolder(oldPath, newPath);
@@ -122,10 +126,65 @@ public class GitProvider : IVCProvider
 
     // -------------------------------------------------------------------------
 
+    /// <summary>
+    /// Paths git has told us are in the index.
+    /// <para>
+    /// POSITIVES ONLY, and that asymmetry is the design. A file git reports as
+    /// tracked stays tracked unless somebody runs `git rm` behind us, which is
+    /// rare, external, and costs nothing worse than a `git add` we did not
+    /// need. An UNTRACKED file becomes tracked the moment the next
+    /// FinishedWrite adds it, so caching that answer would be wrong within
+    /// milliseconds.
+    /// </para>
+    /// <para>
+    /// It is here because FinishedWrite runs on every write, and a tool that
+    /// autosaves was paying a `git ls-files` subprocess per keystroke-triggered
+    /// save.
+    /// </para>
+    /// </summary>
+    private static readonly HashSet<string> _trackedCache = new();
+
+    /// <summary>Forget which paths are tracked. For a test, or a working copy
+    /// rearranged underneath a long-running process.</summary>
+    public static void ClearTrackedCache()
+    {
+        lock (_trackedCache) _trackedCache.Clear();
+    }
+
+    private static bool Remembered(string filePath)
+    {
+        lock (_trackedCache) return _trackedCache.Contains(Path.GetFullPath(filePath));
+    }
+
+    /// <summary>A successful `git add` puts the path in the index.</summary>
+    private static void MarkTracked(string filePath)
+    {
+        lock (_trackedCache) _trackedCache.Add(Path.GetFullPath(filePath));
+    }
+
+    /// <summary>A path this library has just taken OUT of the index.</summary>
+    private static void UnmarkTracked(string filePath)
+    {
+        lock (_trackedCache) _trackedCache.Remove(Path.GetFullPath(filePath));
+    }
+
+    /// <summary>Everything under this folder leaves the index together.</summary>
+    private static void UnmarkTrackedUnder(string folderPath)
+    {
+        var prefix = Path.GetFullPath(folderPath) + Path.DirectorySeparatorChar;
+        lock (_trackedCache)
+        {
+            _trackedCache.RemoveWhere(p => p.StartsWith(prefix, StringComparison.Ordinal));
+            _trackedCache.Remove(Path.GetFullPath(folderPath));
+        }
+    }
+
     private static bool IsTracked(string filePath)
     {
+        if (Remembered(filePath)) return true;
         var cwd = Path.GetDirectoryName(filePath) ?? ".";
         var result = Git(["ls-files", "--error-unmatch", filePath], cwd);
+        if (result.ExitCode == 0) MarkTracked(filePath);
         return result.ExitCode == 0;
     }
 
@@ -137,8 +196,10 @@ public class GitProvider : IVCProvider
 
     private static async Task<bool> IsTrackedAsync(string filePath)
     {
+        if (Remembered(filePath)) return true;
         var cwd = Path.GetDirectoryName(filePath) ?? ".";
         var result = await GitAsync(["ls-files", "--error-unmatch", filePath], cwd).ConfigureAwait(false);
+        if (result.ExitCode == 0) MarkTracked(filePath);
         return result.ExitCode == 0;
     }
 
