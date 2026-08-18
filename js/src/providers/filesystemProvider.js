@@ -29,6 +29,12 @@ function makeWritable(filePath) {
 export class FilesystemProvider {
   get name() { return 'filesystem'; }
 
+  /** No version control, so no user. Undefined is the honest answer, not ''. */
+  currentUser() { return undefined; }
+
+  /** Async twin of {@link currentUser}. */
+  async currentUserAsync() { return undefined; }
+
   prepareToWrite(filePath) {
     if (!existsSync(filePath)) return okResult();
     if (isWritable(filePath)) return okResult();

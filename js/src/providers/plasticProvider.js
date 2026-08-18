@@ -43,6 +43,12 @@ function trackedFromShortStatus(result) {
 export class PlasticProvider {
   get name() { return 'plastic'; }
 
+  /** `cm whoami`, the same call the lock check already makes to tell our lock from someone else's. */
+  currentUser() { const u = plasticWhoami(); return u === '' ? undefined : u; }
+
+  /** Async twin of {@link currentUser}. */
+  async currentUserAsync() { const u = await plasticWhoamiAsync(); return u === '' ? undefined : u; }
+
   prepareToWrite(filePath) {
     if (!existsSync(filePath)) return okResult();
 

@@ -367,6 +367,36 @@ export async function writeTextFilesAsync(files, encoding = 'utf8') {
  * @param {import('./vcStatus.js').VCStatusOptions} [options]
  * @returns {import('./vcStatus.js').VCFileStatus[]}
  */
+/**
+ * Who this VCS believes the current user is, as it would name them in `lockedBy` ("bob@bob-ws",
+ * "alovelace"). Undefined when the provider cannot say: the filesystem provider always, git with no
+ * configured `user.name`, svn ever (it identifies locks by token, never by name).
+ *
+ * `pathHint` picks WHICH working copy is asked, the same way every other call here resolves a provider
+ * from a path; it defaults to the process's own directory. A host that has pinned a provider with
+ * {@link setProvider} - which both desktop apps do - gets that one regardless.
+ *
+ * Meant for SEEDING a name the person can then change, not for using as an identity: a workspace
+ * account is not always a name somebody wants on their words.
+ *
+ * @param {string} [pathHint]
+ * @returns {string | undefined}
+ */
+export function currentUser(pathHint) {
+  return resolveProvider(pathHint ?? process.cwd()).currentUser?.(pathHint ?? process.cwd());
+}
+
+/**
+ * Async twin of {@link currentUser}.
+ *
+ * @param {string} [pathHint]
+ * @returns {Promise<string | undefined>}
+ */
+export async function currentUserAsync(pathHint) {
+  const where = pathHint ?? process.cwd();
+  return resolveProvider(where).currentUserAsync?.(where);
+}
+
 export function fileStatus(filePaths, options = {}) {
   const groups = new Map();
   for (const filePath of filePaths) {

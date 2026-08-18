@@ -328,6 +328,33 @@ public static class VCLib
     /// an extra round-trip. Perforce and git-LFS report that data either way.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Who this VCS believes the current user is, as it would name them in
+    /// <see cref="VCFileStatus.LockedBy"/> ("bob@bob-ws", "alovelace"). Null when the provider
+    /// cannot say: the filesystem provider always, git with no configured <c>user.name</c>, and
+    /// SVN ever - it identifies locks by token, never by name.
+    /// <para>
+    /// <paramref name="pathHint"/> picks WHICH working copy is asked, the same way every other
+    /// call here resolves a provider from a path; it defaults to the process's own directory. A
+    /// host that has pinned a provider with <see cref="SetProvider"/> gets that one regardless.
+    /// </para>
+    /// <para>
+    /// Meant for SEEDING a name the person can then change, not for using as an identity.
+    /// </para>
+    /// </summary>
+    public static string? CurrentUser(string? pathHint = null)
+    {
+        var where = pathHint ?? Directory.GetCurrentDirectory();
+        return GetProvider(where).CurrentUser(where);
+    }
+
+    /// <summary>Async twin of <see cref="CurrentUser"/>.</summary>
+    public static Task<string?> CurrentUserAsync(string? pathHint = null)
+    {
+        var where = pathHint ?? Directory.GetCurrentDirectory();
+        return GetProvider(where).CurrentUserAsync(where);
+    }
+
     public static IReadOnlyList<VCFileStatus> FileStatus(IReadOnlyList<string> filePaths, bool remote = false)
     {
         var groups = new Dictionary<string, (IVCProvider Provider, List<string> Paths)>();

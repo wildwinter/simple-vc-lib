@@ -9,6 +9,12 @@ public class FilesystemProvider : IVCProvider
 {
     public string Name => "filesystem";
 
+    /// <summary>No version control, so no user. Null is the honest answer, not "".</summary>
+    public string? CurrentUser(string? pathHint = null) => null;
+
+    /// <summary>Async twin of <see cref="CurrentUser"/>.</summary>
+    public Task<string?> CurrentUserAsync(string? pathHint = null) => Task.FromResult<string?>(null);
+
     public VCResult PrepareToWrite(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();

@@ -12,6 +12,20 @@ public partial class PlasticProvider : IVCProvider
     private static readonly FilesystemProvider _fs = new();
     public string Name => "plastic";
 
+    /// <summary><c>cm whoami</c> - the same call the lock check makes to tell our lock from another's.</summary>
+    public string? CurrentUser(string? pathHint = null)
+    {
+        var u = PlasticWhoami();
+        return u.Length > 0 ? u : null;
+    }
+
+    /// <summary>Async twin of <see cref="CurrentUser"/>.</summary>
+    public async Task<string?> CurrentUserAsync(string? pathHint = null)
+    {
+        var u = await PlasticWhoamiAsync().ConfigureAwait(false);
+        return u.Length > 0 ? u : null;
+    }
+
     public VCResult PrepareToWrite(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();

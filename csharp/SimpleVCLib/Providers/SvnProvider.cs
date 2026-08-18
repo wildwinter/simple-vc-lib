@@ -12,6 +12,22 @@ public partial class SvnProvider : IVCProvider
     private static readonly FilesystemProvider _fs = new();
     public string Name => "svn";
 
+    /// <summary>
+    /// Null, deliberately.
+    /// <para>
+    /// Unlike the others this provider never learns a username: it tells our lock from someone
+    /// else's by comparing the working copy's lock TOKEN against the server's, which needs no
+    /// identity at all. The only sources are <c>svn auth</c> (1.9+, a human-readable dump whose
+    /// shape is not a contract) and the <c>~/.subversion/auth</c> cache (a client implementation
+    /// detail). Guessing wrong is worse than saying nothing, because the answer seeds an identity
+    /// box the author then has to correct.
+    /// </para>
+    /// </summary>
+    public string? CurrentUser(string? pathHint = null) => null;
+
+    /// <summary>Async twin of <see cref="CurrentUser"/>.</summary>
+    public Task<string?> CurrentUserAsync(string? pathHint = null) => Task.FromResult<string?>(null);
+
     public VCResult PrepareToWrite(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();

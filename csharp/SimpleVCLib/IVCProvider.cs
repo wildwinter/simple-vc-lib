@@ -81,4 +81,27 @@ public interface IVCProvider
 
     /// <summary>Async twin of <see cref="Status"/> - spawned without blocking a thread.</summary>
     Task<IReadOnlyList<VCFileStatus>> StatusAsync(IReadOnlyList<string> filePaths, bool remote = false);
+
+    /// <summary>
+    /// Who this VCS believes the current user is, as it would name them in
+    /// <see cref="VCFileStatus.LockedBy"/> ("bob@bob-ws", "alovelace").
+    /// <para>
+    /// Null when the provider cannot say: the filesystem provider always, git with no configured
+    /// <c>user.name</c>, and SVN ever - it tells our lock from someone else's by comparing lock
+    /// TOKENS, so it never learns a name to report.
+    /// </para>
+    /// <para>
+    /// Meant for SEEDING a name the person can then change, not for using as an identity: a
+    /// workspace account is not always a name somebody wants on their words.
+    /// </para>
+    /// </summary>
+    /// <para>
+    /// DEFAULTED so that adding it did not break every existing implementor - a third-party
+    /// provider, or a test fake - which is what an interface member without a body would have
+    /// done to a published library. The JS port says the same thing with optional chaining.
+    /// </para>
+    string? CurrentUser(string? pathHint = null) => null;
+
+    /// <summary>Async twin of <see cref="CurrentUser"/>. Defaulted for the same reason.</summary>
+    Task<string?> CurrentUserAsync(string? pathHint = null) => Task.FromResult<string?>(null);
 }

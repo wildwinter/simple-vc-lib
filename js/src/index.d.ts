@@ -70,6 +70,11 @@ export interface IVCProvider {
   status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
   /** Async twin of {@link status}. */
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
+  /** Who this VCS believes the current user is, as it would name them in `lockedBy`
+   *  ("bob@bob-ws", "alovelace"). Undefined when the provider cannot say. */
+  currentUser(pathHint?: string): string | undefined;
+  /** Async twin of {@link currentUser}. */
+  currentUserAsync(pathHint?: string): Promise<string | undefined>;
 }
 
 export declare class GitProvider implements IVCProvider {
@@ -90,6 +95,8 @@ export declare class GitProvider implements IVCProvider {
   status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
   /** Async twin of {@link status}. */
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
+  currentUser(pathHint?: string): string | undefined;
+  currentUserAsync(pathHint?: string): Promise<string | undefined>;
 }
 
 export declare class PerforceProvider implements IVCProvider {
@@ -110,6 +117,8 @@ export declare class PerforceProvider implements IVCProvider {
   status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
   /** Async twin of {@link status}. */
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
+  currentUser(pathHint?: string): string | undefined;
+  currentUserAsync(pathHint?: string): Promise<string | undefined>;
 }
 
 export declare class PlasticProvider implements IVCProvider {
@@ -130,6 +139,8 @@ export declare class PlasticProvider implements IVCProvider {
   status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
   /** Async twin of {@link status}. */
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
+  currentUser(pathHint?: string): string | undefined;
+  currentUserAsync(pathHint?: string): Promise<string | undefined>;
 }
 
 export declare class SvnProvider implements IVCProvider {
@@ -150,6 +161,8 @@ export declare class SvnProvider implements IVCProvider {
   status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
   /** Async twin of {@link status}. */
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
+  currentUser(pathHint?: string): string | undefined;
+  currentUserAsync(pathHint?: string): Promise<string | undefined>;
 }
 
 export declare class FilesystemProvider implements IVCProvider {
@@ -170,6 +183,8 @@ export declare class FilesystemProvider implements IVCProvider {
   status(filePaths: string[], options?: VCStatusOptions): VCFileStatus[];
   /** Async twin of {@link status}. */
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
+  currentUser(pathHint?: string): string | undefined;
+  currentUserAsync(pathHint?: string): Promise<string | undefined>;
 }
 
 /**
@@ -271,6 +286,18 @@ export declare function fileStatus(filePaths: string[], options?: VCStatusOption
  * provider rather than the sum.
  */
 export declare function fileStatusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
+
+/**
+ * Who this VCS believes the current user is, as it would name them in `lockedBy`
+ * ("bob@bob-ws", "alovelace"). Undefined when the provider cannot say: the filesystem
+ * provider always, git with no configured `user.name`, svn ever.
+ *
+ * Meant for SEEDING a name the person can then change, not for using as an identity.
+ */
+export declare function currentUser(pathHint?: string): string | undefined;
+
+/** Async twin of {@link currentUser}. */
+export declare function currentUserAsync(pathHint?: string): Promise<string | undefined>;
 
 /**
  * Override the command runner used for all VC operations - lets tests inject

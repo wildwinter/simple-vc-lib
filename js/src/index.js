@@ -1,4 +1,4 @@
-export { prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder, writeTextFile, writeBinaryFile, writeTextFiles, fileStatus, prepareToWriteAsync, finishedWriteAsync, deleteFileAsync, deleteFolderAsync, renameFileAsync, renameFolderAsync, writeTextFileAsync, writeBinaryFileAsync, writeTextFilesAsync, fileStatusAsync, setProvider, clearProvider, clearVcCaches } from './vcLib.js';
+export { prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder, writeTextFile, writeBinaryFile, writeTextFiles, fileStatus, currentUser, currentUserAsync, prepareToWriteAsync, finishedWriteAsync, deleteFileAsync, deleteFolderAsync, renameFileAsync, renameFolderAsync, writeTextFileAsync, writeBinaryFileAsync, writeTextFilesAsync, fileStatusAsync, setProvider, clearProvider, clearVcCaches } from './vcLib.js';
 export { setCommandRunner, clearCommandRunner } from './commandRunner.js';
 export { GitProvider } from './providers/gitProvider.js';
 export { PerforceProvider } from './providers/perforceProvider.js';

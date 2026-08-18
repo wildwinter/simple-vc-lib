@@ -25,6 +25,26 @@ function p4Async(args) {
 }
 
 /**
+ * The user p4 believes we are, from `p4 info`'s `User name:` line - the same name it writes into
+ * `lockedBy`, so an app that shows both sees one person under one name. Undefined when p4 is absent or
+ * unconfigured, which is the common case on a machine that simply has the binary installed.
+ */
+function p4UserName() {
+  return parseP4User(p4(['info']));
+}
+
+async function p4UserNameAsync() {
+  return parseP4User(await p4Async(['info']));
+}
+
+function parseP4User(result) {
+  if (result.exitCode !== 0) return undefined;
+  const line = /^User name:\s*(.+)$/m.exec(result.output);
+  const name = line?.[1]?.trim() ?? '';
+  return name === '' ? undefined : name;
+}
+
+/**
  * Returns p4 fstat info for a file, or null if the file is not in the depot.
  */
 function fstat(filePath) {
@@ -119,6 +139,12 @@ function isInDepotFstat(info) {
  */
 export class PerforceProvider {
   get name() { return 'perforce'; }
+
+  /** The `User name` p4 reports, which is the name it puts in `lockedBy`. */
+  currentUser() { return p4UserName(); }
+
+  /** Async twin of {@link currentUser}. */
+  currentUserAsync() { return p4UserNameAsync(); }
 
   prepareToWrite(filePath) {
     if (!existsSync(filePath)) return okResult();

@@ -34,6 +34,23 @@ function gitAsync(args, cwd, options = {}) {
   return runCommandAsync('git', gitArgv(args, cwd), { cwd, ...options });
 }
 
+/**
+ * `git config user.name`, which is what git would put in a commit and the closest thing it has to an
+ * identity. Empty when unset - a fresh install with no global config - and that reads as undefined
+ * rather than as a user called "".
+ */
+function gitUserName(cwd) {
+  const r = git(['config', 'user.name'], cwd);
+  const name = r.exitCode === 0 ? r.output.trim() : '';
+  return name === '' ? undefined : name;
+}
+
+async function gitUserNameAsync(cwd) {
+  const r = await gitAsync(['config', 'user.name'], cwd);
+  const name = r.exitCode === 0 ? r.output.trim() : '';
+  return name === '' ? undefined : name;
+}
+
 function gitArgv(args, cwd) {
   const isWindows = process.platform === 'win32';
   const safeCwd = isWindows ? cwd.replace(/\\/g, '/') : cwd;
@@ -123,6 +140,12 @@ async function isInRepoAsync(dir) {
  */
 export class GitProvider {
   get name() { return 'git'; }
+
+  /** `git config user.name`, resolved from `cwd` so a repo-local override wins over the global one. */
+  currentUser(cwd = process.cwd()) { return gitUserName(cwd); }
+
+  /** Async twin of {@link currentUser}. */
+  currentUserAsync(cwd = process.cwd()) { return gitUserNameAsync(cwd); }
 
   prepareToWrite(filePath) {
     if (!existsSync(filePath)) return okResult();

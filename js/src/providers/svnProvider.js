@@ -37,6 +37,20 @@ async function isTrackedAsync(filePath) {
 export class SvnProvider {
   get name() { return 'svn'; }
 
+  /**
+   * Undefined, deliberately.
+   *
+   * Unlike the others this provider never learns a username: it tells our lock from someone else's by
+   * comparing the working copy's lock TOKEN against the server's, which needs no identity at all. The
+   * only sources are `svn auth` (1.9+, a human-readable dump whose shape is not a contract) and the
+   * `~/.subversion/auth` cache (an implementation detail of the client). Guessing wrong here is worse
+   * than saying nothing, because the answer seeds an identity box the author then has to correct.
+   */
+  currentUser() { return undefined; }
+
+  /** Async twin of {@link currentUser}. */
+  async currentUserAsync() { return undefined; }
+
   prepareToWrite(filePath) {
     if (!existsSync(filePath)) return okResult();
 

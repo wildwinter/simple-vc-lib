@@ -12,6 +12,21 @@ public class PerforceProvider : IVCProvider
     private static readonly FilesystemProvider _fs = new();
     public string Name => "perforce";
 
+    /// <summary>The <c>User name</c> <c>p4 info</c> prints, which is the name it puts in LockedBy.</summary>
+    public string? CurrentUser(string? pathHint = null) => ParseP4User(P4(["info"]));
+
+    /// <summary>Async twin of <see cref="CurrentUser"/>.</summary>
+    public async Task<string?> CurrentUserAsync(string? pathHint = null) =>
+        ParseP4User(await P4Async(["info"]).ConfigureAwait(false));
+
+    private static string? ParseP4User(CommandRunner.Result result)
+    {
+        if (result.ExitCode != 0) return null;
+        var m = Regex.Match(result.Output, @"^User name:\s*(.+)$", RegexOptions.Multiline);
+        var name = m.Success ? m.Groups[1].Value.Trim() : "";
+        return name.Length > 0 ? name : null;
+    }
+
     public VCResult PrepareToWrite(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();

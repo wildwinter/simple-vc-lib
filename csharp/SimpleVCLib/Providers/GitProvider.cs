@@ -12,6 +12,23 @@ public class GitProvider : IVCProvider
     private static readonly FilesystemProvider _fs = new();
     public string Name => "git";
 
+    /// <summary>
+    /// <c>git config user.name</c>, resolved from <paramref name="pathHint"/> so a repo-local
+    /// override wins over the global one. Null when unset, rather than "".
+    /// </summary>
+    public string? CurrentUser(string? pathHint = null)
+    {
+        var r = Git(["config", "user.name"], pathHint ?? Directory.GetCurrentDirectory());
+        return r.ExitCode == 0 && r.Output.Trim().Length > 0 ? r.Output.Trim() : null;
+    }
+
+    /// <summary>Async twin of <see cref="CurrentUser"/>.</summary>
+    public async Task<string?> CurrentUserAsync(string? pathHint = null)
+    {
+        var r = await GitAsync(["config", "user.name"], pathHint ?? Directory.GetCurrentDirectory()).ConfigureAwait(false);
+        return r.ExitCode == 0 && r.Output.Trim().Length > 0 ? r.Output.Trim() : null;
+    }
+
     public VCResult PrepareToWrite(string filePath)
     {
         return _fs.PrepareToWrite(filePath);
