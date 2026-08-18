@@ -71,10 +71,15 @@ export interface IVCProvider {
   /** Async twin of {@link status}. */
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
   /** Who this VCS believes the current user is, as it would name them in `lockedBy`
-   *  ("bob@bob-ws", "alovelace"). Undefined when the provider cannot say. */
-  currentUser(pathHint?: string): string | undefined;
-  /** Async twin of {@link currentUser}. */
-  currentUserAsync(pathHint?: string): Promise<string | undefined>;
+   *  ("bob@bob-ws", "alovelace"). Undefined when the provider cannot say.
+   *
+   *  OPTIONAL so that adding it did not break every existing implementor - a third-party provider, or
+   *  a test fake - which is what a required member would have done to a published library. The
+   *  dispatch calls it with optional chaining, and the C# port defaults its interface members for the
+   *  same reason. */
+  currentUser?(pathHint?: string): string | undefined;
+  /** Async twin of {@link currentUser}. Optional for the same reason. */
+  currentUserAsync?(pathHint?: string): Promise<string | undefined>;
 }
 
 export declare class GitProvider implements IVCProvider {
