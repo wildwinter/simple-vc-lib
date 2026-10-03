@@ -637,6 +637,48 @@ public class SvnProviderTests : IDisposable
         return (p.ExitCode, output);
     }
 
+    /// <summary>Commit a new file to the working copy, optionally with svn:needs-lock set.</summary>
+    private string CommitSvnFile(string name, bool needsLock = false)
+    {
+        var filePath = Path.Combine(_wcDir, name);
+        File.WriteAllText(filePath, "committed");
+        Svn($"add \"{filePath}\"", _wcDir);
+        if (needsLock) Svn($"propset svn:needs-lock \"*\" \"{filePath}\"", _wcDir);
+        Svn($"commit -m \"add {name}\" --username test --no-auth-cache", _wcDir);
+        return filePath;
+    }
+
+    private bool HasLockToken(string filePath) =>
+        Svn($"info \"{filePath}\"", _wcDir).Output.Contains("Lock Token");
+
+    [Fact]
+    public void PrepareToWrite_NeedsLockFile_IsLockedNotJustMadeWritable()
+    {
+        if (!_available) return;
+
+        var filePath = CommitSvnFile("needs-lock.txt", needsLock: true);
+        Assert.True(new FileInfo(filePath).IsReadOnly, "svn leaves an unlocked needs-lock file read-only");
+
+        var result = VCLib.PrepareToWrite(filePath);
+        Assert.True(result.Success, result.Message);
+        Assert.True(HasLockToken(filePath), "the file is locked in SVN");
+        Assert.False(new FileInfo(filePath).IsReadOnly);
+    }
+
+    [Fact]
+    public void PrepareToWrite_ReadOnlyFileWithoutNeedsLock_OnlyClearsReadOnlyBit()
+    {
+        if (!_available) return;
+
+        var filePath = CommitSvnFile("plain-readonly.txt");
+        new FileInfo(filePath).IsReadOnly = true;
+
+        var result = VCLib.PrepareToWrite(filePath);
+        Assert.True(result.Success, result.Message);
+        Assert.False(new FileInfo(filePath).IsReadOnly);
+        Assert.False(HasLockToken(filePath), "no lock is taken");
+    }
+
     [Fact]
     public void FinishedWrite_NewFile_AddsToSvn()
     {

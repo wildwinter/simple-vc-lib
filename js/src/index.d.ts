@@ -52,6 +52,16 @@ export interface VCWriteOutcome {
   message: string;
 }
 
+/** Options for writeTextFiles / writeTextFilesAsync. */
+export interface VCWriteBatchOptions {
+  /**
+   * Check the whole batch out before writing any of it. If any file cannot be
+   * prepared, nothing is written and nothing is left checked out. Default false:
+   * each file is prepared and written in turn, and one refusal does not stop the rest.
+   */
+  allOrNothing?: boolean;
+}
+
 export interface IVCProvider {
   readonly name: string;
   prepareToWrite(filePath: string): VCResult;
@@ -80,6 +90,17 @@ export interface IVCProvider {
   currentUser?(pathHint?: string): string | undefined;
   /** Async twin of {@link currentUser}. Optional for the same reason. */
   currentUserAsync?(pathHint?: string): Promise<string | undefined>;
+  /**
+   * Undo what prepareToWrite did to this file in an all-or-nothing batch that has to back
+   * out. `before` is the file's status from before the batch; anything it already reports
+   * as `openedByMe` is the user's and is never undone.
+   *
+   * OPTIONAL for the same reason as {@link currentUser}: a provider without it is treated
+   * as having nothing to undo.
+   */
+  undoPrepareToWrite?(filePath: string, before: VCFileStatus): VCResult;
+  /** Async twin of {@link undoPrepareToWrite}. Optional for the same reason. */
+  undoPrepareToWriteAsync?(filePath: string, before: VCFileStatus): Promise<VCResult>;
 }
 
 export declare class GitProvider implements IVCProvider {
@@ -102,6 +123,8 @@ export declare class GitProvider implements IVCProvider {
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
   currentUser(pathHint?: string): string | undefined;
   currentUserAsync(pathHint?: string): Promise<string | undefined>;
+  undoPrepareToWrite(filePath: string, before: VCFileStatus): VCResult;
+  undoPrepareToWriteAsync(filePath: string, before: VCFileStatus): Promise<VCResult>;
 }
 
 export declare class PerforceProvider implements IVCProvider {
@@ -124,6 +147,8 @@ export declare class PerforceProvider implements IVCProvider {
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
   currentUser(pathHint?: string): string | undefined;
   currentUserAsync(pathHint?: string): Promise<string | undefined>;
+  undoPrepareToWrite(filePath: string, before: VCFileStatus): VCResult;
+  undoPrepareToWriteAsync(filePath: string, before: VCFileStatus): Promise<VCResult>;
 }
 
 export declare class PlasticProvider implements IVCProvider {
@@ -146,6 +171,8 @@ export declare class PlasticProvider implements IVCProvider {
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
   currentUser(pathHint?: string): string | undefined;
   currentUserAsync(pathHint?: string): Promise<string | undefined>;
+  undoPrepareToWrite(filePath: string, before: VCFileStatus): VCResult;
+  undoPrepareToWriteAsync(filePath: string, before: VCFileStatus): Promise<VCResult>;
 }
 
 export declare class SvnProvider implements IVCProvider {
@@ -168,6 +195,8 @@ export declare class SvnProvider implements IVCProvider {
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
   currentUser(pathHint?: string): string | undefined;
   currentUserAsync(pathHint?: string): Promise<string | undefined>;
+  undoPrepareToWrite(filePath: string, before: VCFileStatus): VCResult;
+  undoPrepareToWriteAsync(filePath: string, before: VCFileStatus): Promise<VCResult>;
 }
 
 export declare class FilesystemProvider implements IVCProvider {
@@ -190,6 +219,8 @@ export declare class FilesystemProvider implements IVCProvider {
   statusAsync(filePaths: string[], options?: VCStatusOptions): Promise<VCFileStatus[]>;
   currentUser(pathHint?: string): string | undefined;
   currentUserAsync(pathHint?: string): Promise<string | undefined>;
+  undoPrepareToWrite(filePath: string, before: VCFileStatus): VCResult;
+  undoPrepareToWriteAsync(filePath: string, before: VCFileStatus): Promise<VCResult>;
 }
 
 /**
@@ -247,8 +278,32 @@ export declare function writeBinaryFile(filePath: string, data: Buffer | Uint8Ar
  * Write a batch of text files through VC, creating parent directories.
  * Every outcome is reported (a refusal carries its why); one refusal does not
  * stop the rest. Each write goes through writeTextFile.
+ *
+ * With `{ allOrNothing: true }`, files whose content is already right are skipped,
+ * then the rest are checked out together with prepareToWriteFiles; if any cannot be,
+ * nothing is written and nothing is left checked out. VC cannot make the disk writes
+ * themselves atomic, so a write or finishedWrite that fails after every checkout has
+ * succeeded is reported against its own file.
  */
-export declare function writeTextFiles(files: { filePath: string; content: string }[], encoding?: BufferEncoding): { success: boolean; results: VCWriteOutcome[] };
+export declare function writeTextFiles(files: { filePath: string; content: string }[], encoding?: BufferEncoding, options?: VCWriteBatchOptions): { success: boolean; results: VCWriteOutcome[] };
+
+/**
+ * Prepare a whole batch of files for writing, or none of them. One batched status
+ * read (`{ remote: true }`) refuses any existing file that is locked by someone else
+ * ('locked', naming the holders) or out of date ('outOfDate'); one refusal means
+ * nothing is checked out. Otherwise each file is prepared in turn, and if one fails
+ * every file this call already prepared is undone, newest first.
+ *
+ * Under Perforce, `lockedBy` lists everyone else who has the file open, so another
+ * user's plain open refuses the batch. A file the user already had open, checked out
+ * or locked is never undone.
+ *
+ * One outcome per input path, in input order.
+ */
+export declare function prepareToWriteFiles(filePaths: string[]): { success: boolean; results: VCWriteOutcome[] };
+
+/** Async twin of {@link prepareToWriteFiles}. */
+export declare function prepareToWriteFilesAsync(filePaths: string[]): Promise<{ success: boolean; results: VCWriteOutcome[] }>;
 
 /** Async twin of {@link prepareToWrite}. */
 export declare function prepareToWriteAsync(filePath: string): Promise<VCResult>;
@@ -263,7 +318,7 @@ export declare function writeTextFileAsync(filePath: string, content: string, en
 export declare function writeBinaryFileAsync(filePath: string, data: Buffer | Uint8Array, forceWrite?: boolean): Promise<VCResult>;
 
 /** Async twin of {@link writeTextFiles}. */
-export declare function writeTextFilesAsync(files: { filePath: string; content: string }[], encoding?: BufferEncoding): Promise<{ success: boolean; results: VCWriteOutcome[] }>;
+export declare function writeTextFilesAsync(files: { filePath: string; content: string }[], encoding?: BufferEncoding, options?: VCWriteBatchOptions): Promise<{ success: boolean; results: VCWriteOutcome[] }>;
 
 /** Async twin of {@link deleteFile}. */
 export declare function deleteFileAsync(filePath: string): Promise<VCResult>;

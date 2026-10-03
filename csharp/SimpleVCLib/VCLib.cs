@@ -200,9 +200,21 @@ public static class VCLib
     /// bob@bob-ws"), never a bare access exception, and one refusal does not stop
     /// the rest. Each write goes through <see cref="WriteTextFile"/> (prepare ->
     /// write -> finished, with the unchanged-content short-circuit).
+    /// <para>
+    /// With <paramref name="allOrNothing"/>, the batch is checked out as a whole before
+    /// anything is written: files whose content is already right are skipped (they need no
+    /// checkout), parent directories are created, then <see cref="PrepareToWriteFiles"/>
+    /// prepares the rest. If any file cannot be prepared, nothing is written and nothing is
+    /// left checked out. Only once every file is prepared are they written and
+    /// <see cref="FinishedWrite"/> called on each. VC cannot make the disk writes themselves
+    /// atomic, so a write or FinishedWrite that fails at that last stage is reported against
+    /// its own file and the others still go ahead.
+    /// </para>
     /// </summary>
-    public static VCWriteBatchResult WriteTextFiles(IReadOnlyList<VCFileWrite> files, Encoding? encoding = null)
+    public static VCWriteBatchResult WriteTextFiles(
+        IReadOnlyList<VCFileWrite> files, Encoding? encoding = null, bool allOrNothing = false)
     {
+        if (allOrNothing) return WriteTextFilesAllOrNothing(files, encoding);
         var results = new List<VCWriteOutcome>();
         foreach (var file in files)
         {
@@ -292,8 +304,9 @@ public static class VCLib
     /// matches the sync version exactly.
     /// </summary>
     public static async Task<VCWriteBatchResult> WriteTextFilesAsync(
-        IReadOnlyList<VCFileWrite> files, Encoding? encoding = null)
+        IReadOnlyList<VCFileWrite> files, Encoding? encoding = null, bool allOrNothing = false)
     {
+        if (allOrNothing) return await WriteTextFilesAllOrNothingAsync(files, encoding).ConfigureAwait(false);
         var results = new List<VCWriteOutcome>();
         foreach (var file in files)
         {
@@ -311,6 +324,339 @@ public static class VCLib
             results.Add(new VCWriteOutcome(file.FilePath, result.Success, result.Status, result.Message));
         }
         return new VCWriteBatchResult(results.All(r => r.Success), results);
+    }
+
+    // -- All-or-nothing batch checkout ----------------------------------------------
+
+    /// <summary>
+    /// The batch's paths once each, keyed by full path so <c>a.txt</c> and <c>/wc/a.txt</c>
+    /// are one file. The first spelling seen is the one handed to the provider.
+    /// </summary>
+    private static List<string> UniqueByPath(IReadOnlyList<string> filePaths)
+    {
+        var seen = new HashSet<string>();
+        var unique = new List<string>();
+        foreach (var filePath in filePaths)
+            if (seen.Add(Path.GetFullPath(filePath))) unique.Add(filePath);
+        return unique;
+    }
+
+    /// <summary>One outcome per INPUT path, in input order, looked up by full path.</summary>
+    private static VCWriteBatchResult ReportBatch(IReadOnlyList<string> filePaths, Dictionary<string, VCResult> byKey)
+    {
+        var results = filePaths.Select(p =>
+        {
+            var r = byKey[Path.GetFullPath(p)];
+            return new VCWriteOutcome(p, r.Success, r.Status, r.Message);
+        }).ToList();
+        return new VCWriteBatchResult(results.All(r => r.Success), results);
+    }
+
+    /// <summary>
+    /// The preflight verdict: a refusal for every existing file someone else holds or that
+    /// is behind the server, and a "not prepared" for everything else. Null when nothing is
+    /// refused and the batch can go ahead.
+    /// </summary>
+    private static Dictionary<string, VCResult>? PreflightRefusals(List<string> unique, IReadOnlyList<VCFileStatus> statuses)
+    {
+        var byKey = new Dictionary<string, VCResult>();
+        for (var i = 0; i < unique.Count; i++)
+        {
+            var filePath = unique[i];
+            var status = statuses[i];
+            if (!File.Exists(filePath)) continue;
+            if (status.LockedBy is { Count: > 0 } holders)
+                byKey[Path.GetFullPath(filePath)] = VCResult.Failure(VCStatus.Locked, $"'{filePath}' is locked by {string.Join(", ", holders)}");
+            else if (status.OutOfDate == true)
+                byKey[Path.GetFullPath(filePath)] = VCResult.Failure(VCStatus.OutOfDate, $"'{filePath}' is out of date; get the latest revision before editing");
+        }
+        if (byKey.Count == 0) return null;
+        foreach (var filePath in unique)
+            byKey.TryAdd(Path.GetFullPath(filePath),
+                VCResult.Error($"'{filePath}' was not prepared because another file in the batch was refused"));
+        return byKey;
+    }
+
+    /// <summary>What an undone path reports: the undo, and whether the undo itself worked.</summary>
+    private static VCResult UndoneOutcome(string filePath, VCResult undo) =>
+        undo.Success
+            ? VCResult.Error($"Checkout of '{filePath}' was undone because another file in the batch failed")
+            : VCResult.Error($"Checkout of '{filePath}' could not be undone after another file in the batch failed: {undo.Message}");
+
+    /// <summary>Run a provider's undo, turning a throw into a result.</summary>
+    private static VCResult UndoOne(IVCProvider provider, string filePath, VCFileStatus before)
+    {
+        try
+        {
+            return provider.UndoPrepareToWrite(filePath, before);
+        }
+        catch (Exception e)
+        {
+            return VCResult.Error(e.Message);
+        }
+    }
+
+    /// <summary>Async twin of <see cref="UndoOne"/>.</summary>
+    private static async Task<VCResult> UndoOneAsync(IVCProvider provider, string filePath, VCFileStatus before)
+    {
+        try
+        {
+            return await provider.UndoPrepareToWriteAsync(filePath, before).ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            return VCResult.Error(e.Message);
+        }
+    }
+
+    /// <summary>
+    /// Prepare a whole batch of files for writing, or none of them.
+    /// <list type="number">
+    /// <item>One batched status read over every path (<see cref="FileStatus"/> with
+    /// <c>remote: true</c>, so SVN and Plastic ask the server who holds what). Any file on disk
+    /// that is <see cref="VCFileStatus.LockedBy"/> someone is refused as
+    /// <see cref="VCStatus.Locked"/>, naming the holders; any that is
+    /// <see cref="VCFileStatus.OutOfDate"/> is refused as <see cref="VCStatus.OutOfDate"/>. One
+    /// refusal means nothing is checked out.</item>
+    /// <item>Otherwise each file is prepared in turn with the provider's
+    /// <see cref="IVCProvider.PrepareToWrite"/>, sequentially, since VC commands on one
+    /// workspace are not safe to run concurrently.</item>
+    /// <item>If one fails, every file this call already prepared is undone, newest first, with
+    /// the provider's <see cref="IVCProvider.UndoPrepareToWrite"/>. A failed undo is reported in
+    /// that file's message, never thrown.</item>
+    /// </list>
+    /// <para>
+    /// Under Perforce, LockedBy lists everyone else who has the file OPEN, not only those
+    /// holding an exclusive lock, so another user's plain <c>p4 edit</c> refuses the batch. That
+    /// is deliberate: it is what hosts already show as "locked by".
+    /// </para>
+    /// <para>
+    /// An undo only reverses what this call did. A file the user already had open, checked out
+    /// or locked (<see cref="VCFileStatus.OpenedByMe"/>) is never reverted, so after a failure it
+    /// is left exactly as it was found.
+    /// </para>
+    /// <para>
+    /// Each input path gets one outcome, in input order (duplicates are prepared once and
+    /// reported for each spelling).
+    /// </para>
+    /// </summary>
+    public static VCWriteBatchResult PrepareToWriteFiles(IReadOnlyList<string> filePaths)
+    {
+        var unique = UniqueByPath(filePaths);
+        var statuses = unique.Count > 0 ? FileStatus(unique, remote: true) : [];
+        var refused = PreflightRefusals(unique, statuses);
+        if (refused is not null) return ReportBatch(filePaths, refused);
+
+        var byKey = new Dictionary<string, VCResult>();
+        var prepared = new List<(string FilePath, IVCProvider Provider, VCFileStatus Before)>();
+        for (var i = 0; i < unique.Count; i++)
+        {
+            var filePath = unique[i];
+            var provider = GetProvider(filePath);
+            var result = provider.PrepareToWrite(filePath);
+            byKey[Path.GetFullPath(filePath)] = result;
+            if (result.Success)
+            {
+                prepared.Add((filePath, provider, statuses[i]));
+                continue;
+            }
+            for (var j = prepared.Count - 1; j >= 0; j--)
+            {
+                var done = prepared[j];
+                byKey[Path.GetFullPath(done.FilePath)] = UndoneOutcome(done.FilePath, UndoOne(done.Provider, done.FilePath, done.Before));
+            }
+            foreach (var unreached in unique.Skip(i + 1))
+                byKey[Path.GetFullPath(unreached)] =
+                    VCResult.Error($"'{unreached}' was not prepared because another file in the batch failed");
+            break;
+        }
+        return ReportBatch(filePaths, byKey);
+    }
+
+    /// <summary>
+    /// Async twin of <see cref="PrepareToWriteFiles"/>. The status read runs concurrently
+    /// across providers, as <see cref="FileStatusAsync"/> does; the checkouts and undos stay
+    /// sequential.
+    /// </summary>
+    public static async Task<VCWriteBatchResult> PrepareToWriteFilesAsync(IReadOnlyList<string> filePaths)
+    {
+        var unique = UniqueByPath(filePaths);
+        var statuses = unique.Count > 0 ? await FileStatusAsync(unique, remote: true).ConfigureAwait(false) : [];
+        var refused = PreflightRefusals(unique, statuses);
+        if (refused is not null) return ReportBatch(filePaths, refused);
+
+        var byKey = new Dictionary<string, VCResult>();
+        var prepared = new List<(string FilePath, IVCProvider Provider, VCFileStatus Before)>();
+        for (var i = 0; i < unique.Count; i++)
+        {
+            var filePath = unique[i];
+            var provider = GetProvider(filePath);
+            var result = await provider.PrepareToWriteAsync(filePath).ConfigureAwait(false);
+            byKey[Path.GetFullPath(filePath)] = result;
+            if (result.Success)
+            {
+                prepared.Add((filePath, provider, statuses[i]));
+                continue;
+            }
+            for (var j = prepared.Count - 1; j >= 0; j--)
+            {
+                var done = prepared[j];
+                var undo = await UndoOneAsync(done.Provider, done.FilePath, done.Before).ConfigureAwait(false);
+                byKey[Path.GetFullPath(done.FilePath)] = UndoneOutcome(done.FilePath, undo);
+            }
+            foreach (var unreached in unique.Skip(i + 1))
+                byKey[Path.GetFullPath(unreached)] =
+                    VCResult.Error($"'{unreached}' was not prepared because another file in the batch failed");
+            break;
+        }
+        return ReportBatch(filePaths, byKey);
+    }
+
+    /// <summary>True when the file is already on disk with exactly this content (the WriteTextFile short-circuit).</summary>
+    private static bool ContentUnchanged(string filePath, string content, Encoding enc)
+    {
+        if (!File.Exists(filePath)) return false;
+        try
+        {
+            return File.ReadAllText(filePath, enc) == content;
+        }
+        catch
+        {
+            return false; // Unreadable: write it the normal way.
+        }
+    }
+
+    /// <summary>Async twin of <see cref="ContentUnchanged"/>.</summary>
+    private static async Task<bool> ContentUnchangedAsync(string filePath, string content, Encoding enc)
+    {
+        if (!File.Exists(filePath)) return false;
+        try
+        {
+            return await File.ReadAllTextAsync(filePath, enc).ConfigureAwait(false) == content;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>A batch that stopped before anything was written: failures keep their own outcome, the rest say why they were left.</summary>
+    private static VCWriteBatchResult AbandonBatch(IReadOnlyList<VCFileWrite> files, VCResult?[] results, List<int> pending)
+    {
+        foreach (var i in pending)
+            results[i] ??= VCResult.Error($"'{files[i].FilePath}' was not written because another file in the batch could not be prepared");
+        return FinishBatch(files, results);
+    }
+
+    /// <summary>One outcome per input file, in input order.</summary>
+    private static VCWriteBatchResult FinishBatch(IReadOnlyList<VCFileWrite> files, VCResult?[] results)
+    {
+        var outcomes = files.Select((f, i) => new VCWriteOutcome(f.FilePath, results[i]!.Success, results[i]!.Status, results[i]!.Message)).ToList();
+        return new VCWriteBatchResult(outcomes.All(r => r.Success), outcomes);
+    }
+
+    /// <summary>Creates each pending file's folder; false (with the failure recorded) if any could not be.</summary>
+    private static bool CreateFolders(IReadOnlyList<VCFileWrite> files, VCResult?[] results, List<int> pending)
+    {
+        var ok = true;
+        foreach (var i in pending)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(files[i].FilePath));
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            }
+            catch (Exception e)
+            {
+                results[i] = VCResult.Error(e.Message);
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    /// <summary><see cref="WriteTextFiles"/> with allOrNothing: see its doc comment.</summary>
+    private static VCWriteBatchResult WriteTextFilesAllOrNothing(IReadOnlyList<VCFileWrite> files, Encoding? encoding)
+    {
+        var enc = encoding ?? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        var results = new VCResult?[files.Count];
+        var pending = new List<int>();
+        for (var i = 0; i < files.Count; i++)
+        {
+            if (ContentUnchanged(files[i].FilePath, files[i].Content, enc)) results[i] = VCResult.Ok();
+            else pending.Add(i);
+        }
+
+        if (!CreateFolders(files, results, pending)) return AbandonBatch(files, results, pending);
+
+        var prep = PrepareToWriteFiles(pending.Select(i => files[i].FilePath).ToList());
+        if (!prep.Success)
+        {
+            for (var j = 0; j < pending.Count; j++)
+            {
+                var r = prep.Results[j];
+                results[pending[j]] = new VCResult(r.Success, r.Status, r.Message);
+            }
+            return FinishBatch(files, results);
+        }
+
+        foreach (var i in pending)
+        {
+            var file = files[i];
+            try
+            {
+                File.WriteAllText(file.FilePath, file.Content, enc);
+            }
+            catch (Exception e)
+            {
+                results[i] = VCResult.Error(e.Message);
+                continue;
+            }
+            results[i] = GetProvider(file.FilePath).FinishedWrite(file.FilePath);
+        }
+        return FinishBatch(files, results);
+    }
+
+    /// <summary>Async twin of <see cref="WriteTextFilesAllOrNothing"/>.</summary>
+    private static async Task<VCWriteBatchResult> WriteTextFilesAllOrNothingAsync(IReadOnlyList<VCFileWrite> files, Encoding? encoding)
+    {
+        var enc = encoding ?? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        var results = new VCResult?[files.Count];
+        var pending = new List<int>();
+        for (var i = 0; i < files.Count; i++)
+        {
+            if (await ContentUnchangedAsync(files[i].FilePath, files[i].Content, enc).ConfigureAwait(false)) results[i] = VCResult.Ok();
+            else pending.Add(i);
+        }
+
+        if (!CreateFolders(files, results, pending)) return AbandonBatch(files, results, pending);
+
+        var prep = await PrepareToWriteFilesAsync(pending.Select(i => files[i].FilePath).ToList()).ConfigureAwait(false);
+        if (!prep.Success)
+        {
+            for (var j = 0; j < pending.Count; j++)
+            {
+                var r = prep.Results[j];
+                results[pending[j]] = new VCResult(r.Success, r.Status, r.Message);
+            }
+            return FinishBatch(files, results);
+        }
+
+        foreach (var i in pending)
+        {
+            var file = files[i];
+            try
+            {
+                await File.WriteAllTextAsync(file.FilePath, file.Content, enc).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                results[i] = VCResult.Error(e.Message);
+                continue;
+            }
+            results[i] = await GetProvider(file.FilePath).FinishedWriteAsync(file.FilePath).ConfigureAwait(false);
+        }
+        return FinishBatch(files, results);
     }
 
     /// <summary>

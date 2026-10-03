@@ -174,8 +174,18 @@ export class GitProvider {
     return errorResult('error', `Cannot add '${filePath}' to git: ${result.error || result.output}`);
   }
 
-  // git prepareToWrite is pure local fs (no spawn), so the async twin just wraps it.
+  /**
+   * Undo what {@link prepareToWrite} did: git takes no locks, so that is at most the
+   * read-only bit, put back on a file that was read-only in `before`.
+   *
+   * @param {string} filePath
+   * @param {import('../vcStatus.js').VCFileStatus} before
+   */
+  undoPrepareToWrite(filePath, before) { return fs.undoPrepareToWrite(filePath, before); }
+
+  // git prepareToWrite is pure local fs (no spawn), so the async twins just wrap it.
   prepareToWriteAsync(filePath) { return Promise.resolve(this.prepareToWrite(filePath)); }
+  undoPrepareToWriteAsync(filePath, before) { return Promise.resolve(this.undoPrepareToWrite(filePath, before)); }
 
   /** Async twin of {@link finishedWrite}. */
   async finishedWriteAsync(filePath) {

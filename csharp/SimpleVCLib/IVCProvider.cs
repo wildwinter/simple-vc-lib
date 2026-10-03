@@ -104,4 +104,24 @@ public interface IVCProvider
 
     /// <summary>Async twin of <see cref="CurrentUser"/>. Defaulted for the same reason.</summary>
     Task<string?> CurrentUserAsync(string? pathHint = null) => Task.FromResult<string?>(null);
+
+    /// <summary>
+    /// Undo what <see cref="PrepareToWrite"/> did to this file, for an all-or-nothing batch
+    /// (<see cref="VCLib.PrepareToWriteFiles"/>) that has to back out.
+    /// <paramref name="before"/> is the file's status from before the batch; anything it already
+    /// reports as <see cref="VCFileStatus.OpenedByMe"/> is the user's and is never undone.
+    /// <para>
+    /// DEFAULTED to "nothing to undo" for the same reason as <see cref="CurrentUser"/>: a
+    /// member without a body would break every existing implementor of a published library.
+    /// The JS port makes it optional and calls it with optional chaining.
+    /// </para>
+    /// </summary>
+    VCResult UndoPrepareToWrite(string filePath, VCFileStatus before) => VCResult.Ok();
+
+    /// <summary>
+    /// Async twin of <see cref="UndoPrepareToWrite"/>. Defaulted for the same reason, to the
+    /// sync undo, so a provider that implements only that still gets it (as the JS port does).
+    /// </summary>
+    Task<VCResult> UndoPrepareToWriteAsync(string filePath, VCFileStatus before) =>
+        Task.FromResult(UndoPrepareToWrite(filePath, before));
 }

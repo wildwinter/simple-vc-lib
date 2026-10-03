@@ -40,10 +40,31 @@ public class FilesystemProvider : IVCProvider
         return VCResult.Ok();
     }
 
+    /// <summary>
+    /// Undo what <see cref="PrepareToWrite"/> did, for an all-or-nothing batch that has to
+    /// back out. The only thing it ever changes is the read-only bit, so a file that was
+    /// read-only in <paramref name="before"/> (the status read before the batch) is made
+    /// read-only again.
+    /// </summary>
+    public VCResult UndoPrepareToWrite(string filePath, VCFileStatus before)
+    {
+        if (before.Writable || !File.Exists(filePath)) return VCResult.Ok();
+        try
+        {
+            new FileInfo(filePath).IsReadOnly = true;
+            return VCResult.Ok("File made read-only again");
+        }
+        catch (Exception ex)
+        {
+            return VCResult.Error($"Cannot make '{filePath}' read-only again: {ex.Message}");
+        }
+    }
+
     // Filesystem operations are local and synchronous; the async twins exist only so
     // callers can treat every provider uniformly. They do no real awaiting.
     public Task<VCResult> PrepareToWriteAsync(string filePath) => Task.FromResult(PrepareToWrite(filePath));
     public Task<VCResult> FinishedWriteAsync(string filePath) => Task.FromResult(FinishedWrite(filePath));
+    public Task<VCResult> UndoPrepareToWriteAsync(string filePath, VCFileStatus before) => Task.FromResult(UndoPrepareToWrite(filePath, before));
     public Task<VCResult> DeleteFileAsync(string filePath) => Task.FromResult(DeleteFile(filePath));
     public Task<VCResult> DeleteFolderAsync(string folderPath) => Task.FromResult(DeleteFolder(folderPath));
     public Task<VCResult> RenameFileAsync(string oldPath, string newPath) => Task.FromResult(RenameFile(oldPath, newPath));

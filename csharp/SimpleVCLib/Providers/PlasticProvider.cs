@@ -106,6 +106,40 @@ public partial class PlasticProvider : IVCProvider
         return VCResult.Error($"Cannot add '{filePath}' to Plastic SCM: {result.Error ?? result.Output}");
     }
 
+    /// <summary>
+    /// Undo what <see cref="PrepareToWrite"/> did, for an all-or-nothing batch that has to
+    /// back out. A controlled file this batch checked out is released with
+    /// <c>cm undocheckout</c>.
+    /// <para>
+    /// A file <paramref name="before"/> reports as OpenedByMe (our lock) or Dirty (already
+    /// checked out or changed) is left alone: that state is the user's, and
+    /// <c>cm undocheckout</c> would discard their changes. Private files get the filesystem undo.
+    /// </para>
+    /// </summary>
+    public VCResult UndoPrepareToWrite(string filePath, VCFileStatus before)
+    {
+        if (!File.Exists(filePath) || before.OpenedByMe == true) return VCResult.Ok();
+        if (!IsTracked(filePath)) return _fs.UndoPrepareToWrite(filePath, before);
+        if (before.Dirty == true) return VCResult.Ok();
+        return UndoCheckoutResult(filePath, Cm(["undocheckout", filePath]));
+    }
+
+    /// <summary>Async twin of <see cref="UndoPrepareToWrite"/>.</summary>
+    public async Task<VCResult> UndoPrepareToWriteAsync(string filePath, VCFileStatus before)
+    {
+        if (!File.Exists(filePath) || before.OpenedByMe == true) return VCResult.Ok();
+        if (!await IsTrackedAsync(filePath).ConfigureAwait(false))
+            return await _fs.UndoPrepareToWriteAsync(filePath, before).ConfigureAwait(false);
+        if (before.Dirty == true) return VCResult.Ok();
+        return UndoCheckoutResult(filePath, await CmAsync(["undocheckout", filePath]).ConfigureAwait(false));
+    }
+
+    /// <summary>The result of the <c>cm undocheckout</c> that undoes a batch checkout.</summary>
+    private static VCResult UndoCheckoutResult(string filePath, CommandRunner.Result result) =>
+        result.ExitCode == 0
+            ? VCResult.Ok("Checkout undone in Plastic SCM")
+            : VCResult.Error($"Cannot undo checkout of '{filePath}' in Plastic SCM: {result.Error ?? result.Output}");
+
     // Delete/rename reuse the tested sync logic on a thread-pool thread.
     public Task<VCResult> DeleteFileAsync(string filePath) => Task.Run(() => DeleteFile(filePath));
     public Task<VCResult> DeleteFolderAsync(string folderPath) => Task.Run(() => DeleteFolder(folderPath));

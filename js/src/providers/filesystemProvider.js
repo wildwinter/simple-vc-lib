@@ -12,6 +12,16 @@ function isWritable(filePath) {
   }
 }
 
+function makeReadOnly(filePath) {
+  try {
+    const mode = statSync(filePath).mode;
+    chmodSync(filePath, mode & ~0o222); // Clears every write bit.
+    return !writableBit(filePath);
+  } catch {
+    return false;
+  }
+}
+
 function makeWritable(filePath) {
   try {
     const mode = statSync(filePath).mode;
@@ -48,10 +58,25 @@ export class FilesystemProvider {
     return okResult();
   }
 
+  /**
+   * Undo what {@link prepareToWrite} did, for an all-or-nothing batch that has to back
+   * out. The only thing it ever changes is the read-only bit, so a file that was
+   * read-only in `before` (the status read before the batch) is made read-only again.
+   *
+   * @param {string} filePath
+   * @param {import('../vcStatus.js').VCFileStatus} before
+   */
+  undoPrepareToWrite(filePath, before) {
+    if (before?.writable !== false || !existsSync(filePath)) return okResult();
+    if (makeReadOnly(filePath)) return okResult('File made read-only again');
+    return errorResult('error', `Cannot make '${filePath}' read-only again`);
+  }
+
   // Filesystem operations are local and synchronous; the async twins exist only so
   // callers can treat every provider uniformly. They do no real awaiting.
   prepareToWriteAsync(filePath) { return Promise.resolve(this.prepareToWrite(filePath)); }
   finishedWriteAsync(filePath) { return Promise.resolve(this.finishedWrite(filePath)); }
+  undoPrepareToWriteAsync(filePath, before) { return Promise.resolve(this.undoPrepareToWrite(filePath, before)); }
   deleteFileAsync(filePath) { return Promise.resolve(this.deleteFile(filePath)); }
   deleteFolderAsync(folderPath) { return Promise.resolve(this.deleteFolder(folderPath)); }
   renameFileAsync(oldPath, newPath) { return Promise.resolve(this.renameFile(oldPath, newPath)); }

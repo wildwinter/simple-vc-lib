@@ -110,6 +110,12 @@ async function reopenAfterPendingDeleteAsync(filePath, info, action) {
   return errorResult('error', `Cannot reopen '${filePath}' for edit after reverting pending delete: ${editResult.error || editResult.output}`);
 }
 
+/** The result of the `p4 revert -a` that undoes a batch checkout. */
+function revertResult(filePath, result) {
+  if (result.exitCode === 0) return okResult('File reverted in Perforce');
+  return errorResult('error', `Cannot revert '${filePath}' in Perforce: ${result.error || result.output}`);
+}
+
 function isInDepotFstat(info) {
   if (info === null) return false;
 
@@ -250,6 +256,32 @@ export class PerforceProvider {
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('ignored')) return fs.finishedWriteAsync(filePath);
     return errorResult('error', `Cannot add '${filePath}' to Perforce: ${result.error || result.output}`);
+  }
+
+  /**
+   * Undo what {@link prepareToWrite} did, for an all-or-nothing batch that has to back
+   * out. A depot file this batch opened for edit is reverted with `p4 revert -a`,
+   * which only reverts a file that is still unchanged; nothing has been written yet,
+   * so it is.
+   *
+   * A file `before` reports as `openedByMe` is left alone: that open is the user's,
+   * not ours. That includes a pending delete which prepareToWrite reopened for edit;
+   * the original delete is not restored. Files outside the depot get the filesystem undo.
+   *
+   * @param {string} filePath
+   * @param {import('../vcStatus.js').VCFileStatus} before
+   */
+  undoPrepareToWrite(filePath, before) {
+    if (!existsSync(filePath) || before?.openedByMe === true) return okResult();
+    if (!isInDepotFstat(fstat(filePath))) return fs.undoPrepareToWrite(filePath, before);
+    return revertResult(filePath, p4(['revert', '-a', filePath]));
+  }
+
+  /** Async twin of {@link undoPrepareToWrite}. */
+  async undoPrepareToWriteAsync(filePath, before) {
+    if (!existsSync(filePath) || before?.openedByMe === true) return okResult();
+    if (!isInDepotFstat(await fstatAsync(filePath))) return fs.undoPrepareToWriteAsync(filePath, before);
+    return revertResult(filePath, await p4Async(['revert', '-a', filePath]));
   }
 
   deleteFile(filePath) {

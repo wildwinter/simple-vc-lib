@@ -31,13 +31,12 @@ public partial class SvnProvider : IVCProvider
     public VCResult PrepareToWrite(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();
+        if (FileStatusHelpers.WritableBit(filePath)) return VCResult.Ok();
 
-        var fsResult = _fs.PrepareToWrite(filePath);
-        if (fsResult.Success) return VCResult.Ok();
-
-        // File is read-only — only expected for files with svn:needs-lock set.
-        if (!IsTracked(filePath))
-            return VCResult.Error($"Cannot make '{filePath}' writable");
+        // Read-only. A tracked file with svn:needs-lock must be LOCKED, not merely made
+        // writable: clearing the bit by hand would let the edit through without the lock
+        // the property exists to demand. Anything else read-only just gets the bit cleared.
+        if (!IsTracked(filePath) || !NeedsLock(filePath)) return _fs.PrepareToWrite(filePath);
 
         var result = Svn(["lock", filePath]);
         if (result.ExitCode == 0) return VCResult.Ok("File locked in SVN");
@@ -76,12 +75,11 @@ public partial class SvnProvider : IVCProvider
     public async Task<VCResult> PrepareToWriteAsync(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();
+        if (FileStatusHelpers.WritableBit(filePath)) return VCResult.Ok();
 
-        var fsResult = await _fs.PrepareToWriteAsync(filePath).ConfigureAwait(false);
-        if (fsResult.Success) return VCResult.Ok();
-
-        if (!await IsTrackedAsync(filePath).ConfigureAwait(false))
-            return VCResult.Error($"Cannot make '{filePath}' writable");
+        // See the sync twin: a needs-lock file is locked, never just made writable.
+        if (!await IsTrackedAsync(filePath).ConfigureAwait(false) || !await NeedsLockAsync(filePath).ConfigureAwait(false))
+            return await _fs.PrepareToWriteAsync(filePath).ConfigureAwait(false);
 
         var result = await SvnAsync(["lock", filePath]).ConfigureAwait(false);
         if (result.ExitCode == 0) return VCResult.Ok("File locked in SVN");
@@ -112,6 +110,49 @@ public partial class SvnProvider : IVCProvider
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
         if (combined.Contains("ignored")) return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
         return VCResult.Error($"Cannot add '{filePath}' to SVN: {result.Error ?? result.Output}");
+    }
+
+    /// <summary>
+    /// Undo what <see cref="PrepareToWrite"/> did, for an all-or-nothing batch that has to
+    /// back out. Only a file that was read-only in <paramref name="before"/> and not already
+    /// ours (the svn:needs-lock case) was touched: its lock is released with
+    /// <c>svn unlock</c>, and the read-only bit put back. A lock <paramref name="before"/>
+    /// reports as OpenedByMe is the user's own and is never released.
+    /// <para>
+    /// A read-only file WITHOUT svn:needs-lock was only made writable, never locked;
+    /// <c>svn unlock</c> then says so, and putting the bit back is all the undo there is.
+    /// </para>
+    /// </summary>
+    public VCResult UndoPrepareToWrite(string filePath, VCFileStatus before)
+    {
+        if (!File.Exists(filePath) || before.OpenedByMe == true || before.Writable) return VCResult.Ok();
+        if (!IsTracked(filePath)) return _fs.UndoPrepareToWrite(filePath, before);
+        return UnlockResult(filePath, before, Svn(["unlock", filePath]));
+    }
+
+    /// <summary>Async twin of <see cref="UndoPrepareToWrite"/>.</summary>
+    public async Task<VCResult> UndoPrepareToWriteAsync(string filePath, VCFileStatus before)
+    {
+        if (!File.Exists(filePath) || before.OpenedByMe == true || before.Writable) return VCResult.Ok();
+        if (!await IsTrackedAsync(filePath).ConfigureAwait(false))
+            return await _fs.UndoPrepareToWriteAsync(filePath, before).ConfigureAwait(false);
+        return UnlockResult(filePath, before, await SvnAsync(["unlock", filePath]).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// The result of the <c>svn unlock</c> that undoes a batch checkout, with the read-only
+    /// bit put back either way (svn restores it for a needs-lock file; a file that was only
+    /// chmodded needs it done by hand).
+    /// </summary>
+    private static VCResult UnlockResult(string filePath, VCFileStatus before, CommandRunner.Result result)
+    {
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        var neverLocked = combined.Contains("not locked") || combined.Contains("no lock");
+        if (result.ExitCode != 0 && !neverLocked)
+            return VCResult.Error($"Cannot unlock '{filePath}' in SVN: {result.Error ?? result.Output}");
+        var restored = _fs.UndoPrepareToWrite(filePath, before);
+        if (!restored.Success) return restored;
+        return VCResult.Ok(result.ExitCode == 0 ? "Lock released in SVN" : restored.Message);
     }
 
     // Delete/rename reuse the tested sync logic on a thread-pool thread.
@@ -183,6 +224,23 @@ public partial class SvnProvider : IVCProvider
 
     private static async Task<bool> IsTrackedAsync(string path) =>
         (await SvnAsync(["info", path]).ConfigureAwait(false)).ExitCode == 0;
+
+    /// <summary>
+    /// True if the file carries svn:needs-lock. <c>svn propget</c> prints the value ("*")
+    /// when the property is set, and prints nothing (or exits non-zero with a warning, on
+    /// newer clients) when it is not.
+    /// </summary>
+    private static bool NeedsLock(string path)
+    {
+        var result = Svn(["propget", "svn:needs-lock", path]);
+        return result.ExitCode == 0 && result.Output.Trim().Length > 0;
+    }
+
+    private static async Task<bool> NeedsLockAsync(string path)
+    {
+        var result = await SvnAsync(["propget", "svn:needs-lock", path]).ConfigureAwait(false);
+        return result.ExitCode == 0 && result.Output.Trim().Length > 0;
+    }
 
     private static CommandRunner.Result Svn(string[] args) =>
         CommandRunner.Run("svn", args);

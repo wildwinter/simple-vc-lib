@@ -55,8 +55,16 @@ public class GitProvider : IVCProvider
         return VCResult.Error($"Cannot add '{filePath}' to git: {result.Error ?? result.Output}");
     }
 
-    // git PrepareToWrite is pure local fs (no spawn), so the async twin just wraps it.
+    /// <summary>
+    /// Undo what <see cref="PrepareToWrite"/> did: git takes no locks, so that is at most the
+    /// read-only bit, put back on a file that was read-only in <paramref name="before"/>.
+    /// </summary>
+    public VCResult UndoPrepareToWrite(string filePath, VCFileStatus before) =>
+        _fs.UndoPrepareToWrite(filePath, before);
+
+    // git PrepareToWrite is pure local fs (no spawn), so the async twins just wrap it.
     public Task<VCResult> PrepareToWriteAsync(string filePath) => Task.FromResult(PrepareToWrite(filePath));
+    public Task<VCResult> UndoPrepareToWriteAsync(string filePath, VCFileStatus before) => Task.FromResult(UndoPrepareToWrite(filePath, before));
 
     /// <summary>Async twin of <see cref="FinishedWrite"/>.</summary>
     public async Task<VCResult> FinishedWriteAsync(string filePath)

@@ -41,8 +41,9 @@ VCLib.DeleteFile("/path/to/old-dialogue.json");
     * [Operations](#operations)
         * [writeTextFile](#writetextfilepath-content-encoding)
         * [writeBinaryFile](#writebinaryfilepath-data)
-        * [writeTextFiles](#writetextfilesfiles-encoding)
+        * [writeTextFiles](#writetextfilesfiles-encoding-options)
         * [prepareToWrite](#preparetowritefilepath)
+        * [prepareToWriteFiles](#preparetowritefilesfilepaths)
         * [finishedWrite](#finishedwritefilepath)
         * [deleteFile](#deletefilefilepath)
         * [deleteFolder](#deletefolderfolderpath)
@@ -91,6 +92,7 @@ The library calls the relevant CLI under the hood. The appropriate CLI tool must
 ### Overview
 * Use **`writeTextFile`** or **`writeBinaryFile`** to write a file. These all-in-one helpers check out or unlock the file if needed, write it, and add it to VC if it's new. Works whether or not the file already exists. If the file already exists and its content is unchanged, no VCS operations are performed and the file is not rewritten (pass `forceWrite: true` to override this).
 * Use **`writeTextFiles`** to write a whole batch of files in one call, with a per-file outcome report — one refused file doesn't stop the rest.
+* Pass **`{ allOrNothing: true }`** to `writeTextFiles` when a batch must land whole or not at all: everything is checked out first, and if any file can't be, nothing is written and nothing is left checked out. **`prepareToWriteFiles`** is that checkout step on its own.
 * If you need finer control, the steps are also available individually: call **`prepareToWrite`** before writing (checks out / unlocks the file, or no-ops if it doesn't exist yet), then write the file yourself, then call **`finishedWrite`** afterwards (adds the file to VC if it's new).
 * Call **`deleteFile`** or **`deleteFolder`** to remove files. Tracked files will be marked for deletion in the VC system; untracked files are just deleted from disk.
 * Call **`renameFile`** or **`renameFolder`** to move or rename files and directories. Tracked items are moved within the VC system; untracked items are moved on disk.
@@ -115,12 +117,29 @@ An all-in-one helper that calls `prepareToWrite`, writes `data` as raw bytes, th
 - Set `forceWrite` to `true` to bypass the content check and always write (default: `false`).
 - Returns the result from whichever step failed, or the result of `finishedWrite` on success.
 
-#### `writeTextFiles(files, encoding)`
+#### `writeTextFiles(files, encoding, options)`
 Writes a **batch** of `{ filePath, content }` entries through VC in one call, creating parent directories as needed. Each file goes through the same pipeline as `writeTextFile` (checkout if needed → write → add if new, with the unchanged-content short-circuit).
 
 - Returns `{ success, results }` where `results` holds one outcome per file (`filePath`, `success`, `status`, `message`).
 - A refused file (e.g. locked by another user) **does not stop the rest of the batch** — it comes back in `results` with its reason, so a tool can report exactly which files failed and why.
 - `success` on the batch is `true` only when every file succeeded.
+
+**All or nothing.** Pass `{ allOrNothing: true }` (C#: `allOrNothing: true`) when a half-written batch would be worse than none, for example importing changes into many files under a lock-based VCS:
+
+1. Files whose content is already right are skipped. They report `ok` and need no checkout.
+2. Parent directories are created. If any can't be, nothing is written.
+3. The remaining files are checked out together with [`prepareToWriteFiles`](#preparetowritefilesfilepaths). If any is refused or fails, **nothing is written and nothing is left checked out**, and the results say which file stopped the batch and why.
+4. Only then is each file written and `finishedWrite` called on it.
+
+Version control can make the checkout all-or-nothing, but not the disk writes themselves: a write or `finishedWrite` that fails at step 4 (a full disk, say) is reported against its own file, and the others still go ahead. Without the option, `writeTextFiles` behaves exactly as described above.
+
+```js
+const batch = writeTextFiles(files, 'utf8', { allOrNothing: true });
+```
+
+```csharp
+var batch = VCLib.WriteTextFiles(files, allOrNothing: true);
+```
 
 #### `prepareToWrite(filePath)`
 Prepares a file path for writing. Use this when you need to write the file yourself rather than via `writeTextFile` / `writeBinaryFile`.
@@ -129,6 +148,44 @@ Prepares a file path for writing. Use this when you need to write the file yours
 - If the file exists and is read-only: checks it out (Perforce, Plastic SCM, SVN) or removes the read-only attribute (Git, filesystem).
 
 On failure, the `status` field indicates the reason: `locked` means the file is exclusively held by another user; `outOfDate` means the local copy is behind the depot and needs syncing first.
+
+#### `prepareToWriteFiles(filePaths)`
+Prepares a whole **batch** of files for writing, or none of them. It is the checkout step of `writeTextFiles` with `allOrNothing`, for when you write the files yourself.
+
+1. **Preflight.** One batched status read over every path (`fileStatus` with `remote: true`, so SVN and Plastic SCM ask the server who holds what). Any file on disk that another user holds is refused with status `locked` and a message naming them (`'scene.json' is locked by bob@bob-ws`); any file behind the server is refused with `outOfDate`. If anything is refused, **nothing is checked out**: the refused files carry their reason, and every other file reports `error` saying it was not prepared because another file in the batch was refused.
+2. **Checkout.** Otherwise each file is prepared in turn with `prepareToWrite`, one at a time (VC commands on one workspace aren't safe to run concurrently).
+3. **Undo on failure.** If one checkout fails, every file this call already checked out is undone, newest first. The failing file reports its own result, the undone files report `error` saying their checkout was undone, and files not yet reached report that they were not prepared. If an undo itself fails, that file's message says so; nothing is thrown.
+
+Returns `{ success, results }` with one outcome per input path, in input order (a path given twice is prepared once and reported twice).
+
+What the undo does, per system. It only ever reverses what this call did:
+
+| System | Undo |
+|---|---|
+| **Perforce** | `p4 revert -a` (reverts only an unchanged file, which it is, since nothing has been written) |
+| **SVN** | `svn unlock` for a `svn:needs-lock` file that was read-only, then the read-only bit is put back |
+| **Plastic SCM** | `cm undocheckout` |
+| **Git, Filesystem** | The read-only bit is put back on a file that was read-only |
+
+- **Perforce counts an open as a lock.** Perforce's `lockedBy` lists everyone else who has the file open, not only holders of an exclusive lock, so another user's plain `p4 edit` refuses the batch. That matches what `fileStatus` already reports, and so what a tool shows as "locked by".
+- **What you already had is never undone.** A file you already had open, checked out or locked (`openedByMe` in the preflight) is left exactly as it was; so is a Plastic SCM file with pending changes. One limit follows: under Perforce, a file of yours pending delete that `prepareToWrite` reopened for edit stays open for edit, rather than going back to pending delete.
+
+```js
+const prep = prepareToWriteFiles(paths);
+if (!prep.success) {
+    for (const r of prep.results.filter((r) => r.status !== 'error'))
+        console.error(`${r.filePath}: ${r.message}`); // the file(s) that stopped the batch
+}
+```
+
+```csharp
+var prep = VCLib.PrepareToWriteFiles(paths);
+if (!prep.Success)
+    foreach (var r in prep.Results.Where(r => r.Status != VCStatus.Error))
+        Console.WriteLine($"{r.FilePath}: {r.Message}");
+```
+
+Custom providers can take part by implementing `undoPrepareToWrite(filePath, before)` (C#: `UndoPrepareToWrite`), where `before` is the file's preflight status. It is optional: a provider without it is treated as having nothing to undo.
 
 #### `finishedWrite(filePath)`
 Notifies the library that a file has been written. Use this after writing the file yourself following a `prepareToWrite` call.
@@ -215,9 +272,9 @@ All operations return a result object with three fields:
 | `status` | string/enum | `ok`, `locked`, `outOfDate`, or `error` |
 | `message` | string | Human-readable detail, especially on failure |
 
-`locked` and `outOfDate` are only produced by `prepareToWrite`, for VC systems that support exclusive locking or require syncing before editing.
+`locked` and `outOfDate` are only produced by `prepareToWrite` and `prepareToWriteFiles` (and so the write helpers built on them), for VC systems that support exclusive locking or require syncing before editing.
 
-Two exceptions to the single-result shape: `writeTextFiles` returns `{ success, results }` with one such outcome per file (plus its `filePath`), and `fileStatus` returns the status records described under [Status Reads](#status-reads).
+Two exceptions to the single-result shape: `writeTextFiles` and `prepareToWriteFiles` return `{ success, results }` with one such outcome per file (plus its `filePath`), and `fileStatus` returns the status records described under [Status Reads](#status-reads).
 
 ### Async API
 Every operation has an async twin with the same name plus `Async`, returning a `Promise` (JS) / `Task` (C#) — so a slow VC command (a Perforce server round-trip, a heavy `cm` startup) never blocks the calling thread:
@@ -233,12 +290,12 @@ var statuses = await VCLib.FileStatusAsync(paths, remote: true);
 await VCLib.WriteTextFileAsync(path, content);
 ```
 
-The full set: `fileStatusAsync`, `prepareToWriteAsync`, `finishedWriteAsync`, `writeTextFileAsync`, `writeBinaryFileAsync`, `writeTextFilesAsync`, `deleteFileAsync`, `deleteFolderAsync`, `renameFileAsync`, `renameFolderAsync`.
+The full set: `fileStatusAsync`, `prepareToWriteAsync`, `prepareToWriteFilesAsync`, `finishedWriteAsync`, `writeTextFileAsync`, `writeBinaryFileAsync`, `writeTextFilesAsync`, `deleteFileAsync`, `deleteFolderAsync`, `renameFileAsync`, `renameFolderAsync`.
 
 Notes:
 - **`fileStatusAsync` runs providers concurrently** — a project spanning several repos/working copies finishes in about the time of its slowest provider, not the sum.
 - **Reads, writes, and (in JS) every operation use real non-blocking subprocess I/O.** In C#, the delete/rename twins reuse the tested sync logic on a thread-pool thread (`Task.Run`) rather than duplicating Perforce's intricate changelist handling — the subprocess wait parks a pooled thread.
-- **`writeTextFilesAsync` is sequential**, matching the sync version (VC checkout commands on one workspace aren't safe to run concurrently).
+- **`writeTextFilesAsync` is sequential**, matching the sync version (VC checkout commands on one workspace aren't safe to run concurrently). So are the checkouts and undos of `prepareToWriteFilesAsync`; only its preflight status read runs providers concurrently.
 
 ### VC Detection
 The library detects the active VC system automatically, in this order:
@@ -352,10 +409,10 @@ Or download `simpleVcLib.js` (ESM) or `simpleVcLib.cjs` (CommonJS) from the [Git
 
 ```javascript
 // ESM (npm)
-import { writeTextFile, writeBinaryFile, writeTextFiles, fileStatus, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from '@wildwinter/simple-vc-lib';
+import { writeTextFile, writeBinaryFile, writeTextFiles, prepareToWriteFiles, fileStatus, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from '@wildwinter/simple-vc-lib';
 
 // ESM (direct file)
-import { writeTextFile, writeBinaryFile, writeTextFiles, fileStatus, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from './simpleVcLib.js';
+import { writeTextFile, writeBinaryFile, writeTextFiles, prepareToWriteFiles, fileStatus, prepareToWrite, finishedWrite, deleteFile, deleteFolder, renameFile, renameFolder } from './simpleVcLib.js';
 
 // All-in-one helpers (checkout + write + add to VC)
 const result = writeTextFile('/path/to/myfile.json', JSON.stringify(data), 'utf8');
@@ -376,6 +433,12 @@ const batch = writeTextFiles([
 ]);
 for (const r of batch.results.filter((r) => !r.success)) {
     console.error(`${r.filePath}: ${r.message}`); // e.g. "locked by bob@bob-ws"
+}
+
+// All or nothing: check every file out first; if any can't be, write none of them
+const whole = writeTextFiles(sceneFiles, 'utf8', { allOrNothing: true });
+if (!whole.success) {
+    console.error('Nothing was written:', whole.results.filter((r) => !r.success).map((r) => r.message));
 }
 
 // Batched status — tracked / writable / locked-by / out-of-date for a whole set of files
@@ -444,6 +507,11 @@ var batch = VCLib.WriteTextFiles([
 ]);
 foreach (var r in batch.Results.Where(r => !r.Success))
     Console.WriteLine($"{r.FilePath}: {r.Message}"); // e.g. "locked by bob@bob-ws"
+
+// All or nothing: check every file out first; if any can't be, write none of them
+var whole = VCLib.WriteTextFiles(sceneFiles, allOrNothing: true);
+if (!whole.Success)
+    Console.WriteLine("Nothing was written: " + string.Join("; ", whole.Results.Where(r => !r.Success).Select(r => r.Message)));
 
 // Batched status — tracked / writable / locked-by / out-of-date for a whole set of files
 foreach (var st in VCLib.FileStatus(["/path/to/scenes/opening.json", "/path/to/scenes/finale.json"]))

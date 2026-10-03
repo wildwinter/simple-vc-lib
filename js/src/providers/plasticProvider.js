@@ -34,6 +34,12 @@ function trackedFromShortStatus(result) {
   return lines.length > 0 && !lines[0].startsWith('?');
 }
 
+/** The result of the `cm undocheckout` that undoes a batch checkout. */
+function undoCheckoutResult(filePath, result) {
+  if (result.exitCode === 0) return okResult('Checkout undone in Plastic SCM');
+  return errorResult('error', `Cannot undo checkout of '${filePath}' in Plastic SCM: ${result.error || result.output}`);
+}
+
 /**
  * Plastic SCM / Unity Version Control provider.
  *
@@ -127,6 +133,32 @@ export class PlasticProvider {
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('ignored')) return fs.finishedWriteAsync(filePath);
     return errorResult('error', `Cannot add '${filePath}' to Plastic SCM: ${result.error || result.output}`);
+  }
+
+  /**
+   * Undo what {@link prepareToWrite} did, for an all-or-nothing batch that has to back
+   * out. A controlled file this batch checked out is released with `cm undocheckout`.
+   *
+   * A file `before` reports as `openedByMe` (our lock) or `dirty` (already checked out
+   * or changed) is left alone: that state is the user's, and `cm undocheckout` would
+   * discard their changes. Private files get the filesystem undo.
+   *
+   * @param {string} filePath
+   * @param {import('../vcStatus.js').VCFileStatus} before
+   */
+  undoPrepareToWrite(filePath, before) {
+    if (!existsSync(filePath) || before?.openedByMe === true) return okResult();
+    if (!isTracked(filePath)) return fs.undoPrepareToWrite(filePath, before);
+    if (before?.dirty === true) return okResult();
+    return undoCheckoutResult(filePath, cm(['undocheckout', filePath]));
+  }
+
+  /** Async twin of {@link undoPrepareToWrite}. */
+  async undoPrepareToWriteAsync(filePath, before) {
+    if (!existsSync(filePath) || before?.openedByMe === true) return okResult();
+    if (!(await isTrackedAsync(filePath))) return fs.undoPrepareToWriteAsync(filePath, before);
+    if (before?.dirty === true) return okResult();
+    return undoCheckoutResult(filePath, await cmAsync(['undocheckout', filePath]));
   }
 
   deleteFile(filePath) {

@@ -559,6 +559,39 @@ describe('SvnProvider', function () {
     assert.isTrue(existsSync(newPath));
   });
 
+  /** Commit a new file to the working copy, optionally with svn:needs-lock set. */
+  function commitSvnFile(name, { needsLock = false } = {}) {
+    const filePath = join(wcDir, name);
+    writeFileSync(filePath, 'committed');
+    spawnSync('svn', ['add', filePath], { encoding: 'utf8' });
+    if (needsLock) spawnSync('svn', ['propset', 'svn:needs-lock', '*', filePath], { encoding: 'utf8' });
+    spawnSync('svn', ['commit', '-m', `add ${name}`, '--username', 'test', '--no-auth-cache'], { cwd: wcDir, encoding: 'utf8' });
+    return filePath;
+  }
+
+  const isWritable = (filePath) => (statSync(filePath).mode & 0o200) !== 0;
+  const lockToken = (filePath) => /Lock Token/.test(spawnSync('svn', ['info', filePath], { encoding: 'utf8' }).stdout);
+
+  it('prepareToWrite LOCKS a needs-lock file rather than only making it writable', () => {
+    const filePath = commitSvnFile('needs-lock.txt', { needsLock: true });
+    assert.isFalse(isWritable(filePath), 'svn leaves an unlocked needs-lock file read-only');
+
+    const result = prepareToWrite(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.isTrue(lockToken(filePath), 'the file is locked in SVN');
+    assert.isTrue(isWritable(filePath));
+  });
+
+  it('prepareToWrite only clears the read-only bit on a tracked file without needs-lock', () => {
+    const filePath = commitSvnFile('plain-readonly.txt');
+    chmodSync(filePath, 0o444);
+
+    const result = prepareToWrite(filePath);
+    assert.isTrue(result.success, result.message);
+    assert.isTrue(isWritable(filePath));
+    assert.isFalse(lockToken(filePath), 'no lock is taken');
+  });
+
   it('auto-detects SVN from .svn directory', () => {
     clearProvider();  // Remove explicit provider — rely on auto-detection.
     const filePath = join(wcDir, 'detected.txt');

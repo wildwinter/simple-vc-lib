@@ -28,6 +28,36 @@ async function isTrackedAsync(filePath) {
 }
 
 /**
+ * True if the file carries svn:needs-lock. `svn propget` prints the value ("*") when
+ * the property is set, and prints nothing (or exits non-zero with a warning, on newer
+ * clients) when it is not.
+ */
+function needsLock(filePath) {
+  const result = svn(['propget', 'svn:needs-lock', filePath]);
+  return result.exitCode === 0 && result.output.trim() !== '';
+}
+
+async function needsLockAsync(filePath) {
+  const result = await svnAsync(['propget', 'svn:needs-lock', filePath]);
+  return result.exitCode === 0 && result.output.trim() !== '';
+}
+
+/**
+ * The result of the `svn unlock` that undoes a batch checkout, with the read-only bit
+ * put back either way (svn restores it for a needs-lock file; a file that was only
+ * chmodded needs it done by hand).
+ */
+function unlockResult(filePath, before, result) {
+  const combined = (result.output + ' ' + result.error).toLowerCase();
+  const neverLocked = combined.includes('not locked') || combined.includes('no lock');
+  if (result.exitCode !== 0 && !neverLocked)
+    return errorResult('error', `Cannot unlock '${filePath}' in SVN: ${result.error || result.output}`);
+  const restored = fs.undoPrepareToWrite(filePath, before);
+  if (!restored.success) return restored;
+  return okResult(result.exitCode === 0 ? 'Lock released in SVN' : restored.message);
+}
+
+/**
  * Subversion (SVN) provider.
  *
  * SVN files are normally writable. The exception is files with the
@@ -53,14 +83,12 @@ export class SvnProvider {
 
   prepareToWrite(filePath) {
     if (!existsSync(filePath)) return okResult();
+    if (writableBit(filePath)) return okResult();
 
-    const fsResult = fs.prepareToWrite(filePath);
-    if (fsResult.success) return okResult();
-
-    // File is read-only — only expected for files with svn:needs-lock set.
-    if (!isTracked(filePath)) {
-      return errorResult('error', `Cannot make '${filePath}' writable`);
-    }
+    // Read-only. A tracked file with svn:needs-lock must be LOCKED, not merely made
+    // writable: clearing the bit by hand would let the edit through without the lock
+    // the property exists to demand. Anything else read-only just gets the bit cleared.
+    if (!isTracked(filePath) || !needsLock(filePath)) return fs.prepareToWrite(filePath);
 
     const result = svn(['lock', filePath]);
     if (result.exitCode === 0) return okResult('File locked in SVN');
@@ -97,13 +125,11 @@ export class SvnProvider {
   /** Async twin of {@link prepareToWrite}. */
   async prepareToWriteAsync(filePath) {
     if (!existsSync(filePath)) return okResult();
+    if (writableBit(filePath)) return okResult();
 
-    const fsResult = await fs.prepareToWriteAsync(filePath);
-    if (fsResult.success) return okResult();
-
-    if (!(await isTrackedAsync(filePath))) {
-      return errorResult('error', `Cannot make '${filePath}' writable`);
-    }
+    // See the sync twin: a needs-lock file is locked, never just made writable.
+    if (!(await isTrackedAsync(filePath)) || !(await needsLockAsync(filePath)))
+      return fs.prepareToWriteAsync(filePath);
 
     const result = await svnAsync(['lock', filePath]);
     if (result.exitCode === 0) return okResult('File locked in SVN');
@@ -132,6 +158,32 @@ export class SvnProvider {
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('ignored')) return fs.finishedWriteAsync(filePath);
     return errorResult('error', `Cannot add '${filePath}' to SVN: ${result.error || result.output}`);
+  }
+
+  /**
+   * Undo what {@link prepareToWrite} did, for an all-or-nothing batch that has to back
+   * out. Only a file that was read-only in `before` and not already ours (the
+   * svn:needs-lock case) was touched: its lock is released with `svn unlock`, and the
+   * read-only bit put back. A lock `before` reports as `openedByMe` is the user's own
+   * and is never released.
+   *
+   * A read-only file WITHOUT svn:needs-lock was only made writable, never locked;
+   * `svn unlock` then says so, and putting the bit back is all the undo there is.
+   *
+   * @param {string} filePath
+   * @param {import('../vcStatus.js').VCFileStatus} before
+   */
+  undoPrepareToWrite(filePath, before) {
+    if (!existsSync(filePath) || before?.openedByMe === true || before?.writable !== false) return okResult();
+    if (!isTracked(filePath)) return fs.undoPrepareToWrite(filePath, before);
+    return unlockResult(filePath, before, svn(['unlock', filePath]));
+  }
+
+  /** Async twin of {@link undoPrepareToWrite}. */
+  async undoPrepareToWriteAsync(filePath, before) {
+    if (!existsSync(filePath) || before?.openedByMe === true || before?.writable !== false) return okResult();
+    if (!(await isTrackedAsync(filePath))) return fs.undoPrepareToWriteAsync(filePath, before);
+    return unlockResult(filePath, before, await svnAsync(['unlock', filePath]));
   }
 
   /** Async twin of {@link deleteFile}. */

@@ -129,6 +129,38 @@ public class PerforceProvider : IVCProvider
         return VCResult.Error($"Cannot add '{filePath}' to Perforce: {result.Error ?? result.Output}");
     }
 
+    /// <summary>
+    /// Undo what <see cref="PrepareToWrite"/> did, for an all-or-nothing batch that has to
+    /// back out. A depot file this batch opened for edit is reverted with <c>p4 revert -a</c>,
+    /// which only reverts a file that is still unchanged; nothing has been written yet, so it is.
+    /// <para>
+    /// A file <paramref name="before"/> reports as OpenedByMe is left alone: that open is the
+    /// user's, not ours. That includes a pending delete which PrepareToWrite reopened for edit;
+    /// the original delete is not restored. Files outside the depot get the filesystem undo.
+    /// </para>
+    /// </summary>
+    public VCResult UndoPrepareToWrite(string filePath, VCFileStatus before)
+    {
+        if (!File.Exists(filePath) || before.OpenedByMe == true) return VCResult.Ok();
+        if (!IsInDepotFstat(Fstat(filePath))) return _fs.UndoPrepareToWrite(filePath, before);
+        return RevertResult(filePath, P4(["revert", "-a", filePath]));
+    }
+
+    /// <summary>Async twin of <see cref="UndoPrepareToWrite"/>.</summary>
+    public async Task<VCResult> UndoPrepareToWriteAsync(string filePath, VCFileStatus before)
+    {
+        if (!File.Exists(filePath) || before.OpenedByMe == true) return VCResult.Ok();
+        if (!IsInDepotFstat(await FstatAsync(filePath).ConfigureAwait(false)))
+            return await _fs.UndoPrepareToWriteAsync(filePath, before).ConfigureAwait(false);
+        return RevertResult(filePath, await P4Async(["revert", "-a", filePath]).ConfigureAwait(false));
+    }
+
+    /// <summary>The result of the <c>p4 revert -a</c> that undoes a batch checkout.</summary>
+    private static VCResult RevertResult(string filePath, CommandRunner.Result result) =>
+        result.ExitCode == 0
+            ? VCResult.Ok("File reverted in Perforce")
+            : VCResult.Error($"Cannot revert '{filePath}' in Perforce: {result.Error ?? result.Output}");
+
     // Delete/rename carry intricate pending-changelist handling; rather than duplicate it,
     // the async twins run the tested sync method on a thread-pool thread (the p4 subprocess
     // wait parks a pooled thread).
