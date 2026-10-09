@@ -26,65 +26,35 @@ public partial class PlasticProvider : IVCProvider
         return u.Length > 0 ? u : null;
     }
 
+    /// <summary>
+    /// Check a controlled file out before it is written. A file already checked out (or
+    /// otherwise pending) in this workspace is not checked out again: a second <c>cm co</c>
+    /// on it fails, and under lock rules it fails as "locked" by our own checkout. Private,
+    /// ignored, and out-of-workspace files only need to be writable.
+    /// </summary>
     public VCResult PrepareToWrite(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();
-
-        if (!IsTracked(filePath))
-            return _fs.PrepareToWrite(filePath);
-
-        var result = Cm(["co", filePath]);
-        if (result.ExitCode == 0) return VCResult.Ok();
-
-        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
-        if (combined.Contains("locked") || combined.Contains("exclusive"))
-            return VCResult.Failure(VCStatus.Locked, $"'{filePath}' is locked");
-        if (combined.Contains("out of date") || combined.Contains("not latest"))
-            return VCResult.Failure(VCStatus.OutOfDate, $"'{filePath}' is out of date — update before editing");
-
-        return VCResult.Error($"Cannot check out '{filePath}': {result.Error ?? result.Output}");
+        if (LocalState(filePath) != CmState.Controlled) return _fs.PrepareToWrite(filePath);
+        return CheckoutResult(filePath, Cm(["co", filePath]));
     }
 
+    /// <summary>Add a new private file to Plastic SCM after it is written.</summary>
     public VCResult FinishedWrite(string filePath)
     {
         if (!File.Exists(filePath))
             return VCResult.Error($"'{filePath}' does not exist after write");
-
-        // cm status --short: exit non-zero = outside workspace, exit 0 with '?' = untracked inside workspace.
-        var statusResult = Cm(["status", "--short", filePath]);
-        if (statusResult.ExitCode != 0)
-            return _fs.FinishedWrite(filePath);
-
-        var lines = statusResult.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        var isTracked = lines.Length > 0 && !lines[0].TrimStart().StartsWith('?');
-        if (isTracked) return VCResult.Ok();
-
-        var result = Cm(["add", filePath]);
-        if (result.ExitCode == 0) return VCResult.Ok("File added to Plastic SCM");
-        // File is ignored — treat as outside the workspace.
-        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
-        if (combined.Contains("ignored")) return _fs.FinishedWrite(filePath);
-        return VCResult.Error($"Cannot add '{filePath}' to Plastic SCM: {result.Error ?? result.Output}");
+        if (LocalState(filePath) != CmState.Private) return _fs.FinishedWrite(filePath);
+        return AddResult(filePath, Cm(["add", filePath]));
     }
 
     /// <summary>Async twin of <see cref="PrepareToWrite"/>.</summary>
     public async Task<VCResult> PrepareToWriteAsync(string filePath)
     {
         if (!File.Exists(filePath)) return VCResult.Ok();
-
-        if (!await IsTrackedAsync(filePath).ConfigureAwait(false))
+        if (await LocalStateAsync(filePath).ConfigureAwait(false) != CmState.Controlled)
             return await _fs.PrepareToWriteAsync(filePath).ConfigureAwait(false);
-
-        var result = await CmAsync(["co", filePath]).ConfigureAwait(false);
-        if (result.ExitCode == 0) return VCResult.Ok();
-
-        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
-        if (combined.Contains("locked") || combined.Contains("exclusive"))
-            return VCResult.Failure(VCStatus.Locked, $"'{filePath}' is locked");
-        if (combined.Contains("out of date") || combined.Contains("not latest"))
-            return VCResult.Failure(VCStatus.OutOfDate, $"'{filePath}' is out of date — update before editing");
-
-        return VCResult.Error($"Cannot check out '{filePath}': {result.Error ?? result.Output}");
+        return CheckoutResult(filePath, await CmAsync(["co", filePath]).ConfigureAwait(false));
     }
 
     /// <summary>Async twin of <see cref="FinishedWrite"/>.</summary>
@@ -92,19 +62,28 @@ public partial class PlasticProvider : IVCProvider
     {
         if (!File.Exists(filePath))
             return VCResult.Error($"'{filePath}' does not exist after write");
-
-        var statusResult = await CmAsync(["status", "--short", filePath]).ConfigureAwait(false);
-        if (statusResult.ExitCode != 0)
+        if (await LocalStateAsync(filePath).ConfigureAwait(false) != CmState.Private)
             return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
-
-        if (TrackedFromShortStatus(statusResult)) return VCResult.Ok();
-
-        var result = await CmAsync(["add", filePath]).ConfigureAwait(false);
-        if (result.ExitCode == 0) return VCResult.Ok("File added to Plastic SCM");
-        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
-        if (combined.Contains("ignored")) return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
-        return VCResult.Error($"Cannot add '{filePath}' to Plastic SCM: {result.Error ?? result.Output}");
+        return AddResult(filePath, await CmAsync(["add", filePath]).ConfigureAwait(false));
     }
+
+    /// <summary>The result of the <c>cm co</c> that checks a controlled file out.</summary>
+    private static VCResult CheckoutResult(string filePath, CommandRunner.Result result)
+    {
+        if (result.ExitCode == 0) return VCResult.Ok();
+        var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
+        if (combined.Contains("locked") || combined.Contains("exclusive"))
+            return VCResult.Failure(VCStatus.Locked, $"'{filePath}' is locked");
+        if (combined.Contains("out of date") || combined.Contains("not latest"))
+            return VCResult.Failure(VCStatus.OutOfDate, $"'{filePath}' is out of date — update before editing");
+        return VCResult.Error($"Cannot check out '{filePath}': {result.Error ?? result.Output}");
+    }
+
+    /// <summary>The result of the <c>cm add</c> that puts a new private file under version control.</summary>
+    private static VCResult AddResult(string filePath, CommandRunner.Result result) =>
+        result.ExitCode == 0
+            ? VCResult.Ok("File added to Plastic SCM")
+            : VCResult.Error($"Cannot add '{filePath}' to Plastic SCM: {result.Error ?? result.Output}");
 
     /// <summary>
     /// Undo what <see cref="PrepareToWrite"/> did, for an all-or-nothing batch that has to
@@ -203,19 +182,70 @@ public partial class PlasticProvider : IVCProvider
 
     // -------------------------------------------------------------------------
 
-    private static bool IsTracked(string path) =>
-        TrackedFromShortStatus(Cm(["status", "--short", path]));
+    /// <summary>One path's state in the workspace; see <see cref="LocalStateFrom"/>.</summary>
+    private enum CmState { Outside, Private, Ignored, CheckedOut, Controlled }
+
+    /// <summary>Tracked by Plastic SCM: controlled, whether or not it is checked out.</summary>
+    private static bool IsTracked(string path) => Tracked(LocalState(path));
 
     private static async Task<bool> IsTrackedAsync(string path) =>
-        TrackedFromShortStatus(await CmAsync(["status", "--short", path]).ConfigureAwait(false));
+        Tracked(await LocalStateAsync(path).ConfigureAwait(false));
 
-    /// <summary>A <c>cm status --short</c> result is tracked when it lists the file without a '?' prefix.</summary>
-    private static bool TrackedFromShortStatus(CommandRunner.Result result)
+    private static bool Tracked(CmState state) => state is CmState.Controlled or CmState.CheckedOut;
+
+    private static CmState LocalState(string path) => LocalStateFrom(Cm(PlasticStatusArgs([path])), path);
+
+    private static async Task<CmState> LocalStateAsync(string path) =>
+        LocalStateFrom(await CmAsync(PlasticStatusArgs([path])).ConfigureAwait(false), path);
+
+    /// <summary>
+    /// One path's state in the workspace, from <c>cm status --machinereadable --all --ignored</c>:
+    /// Outside when cm fails (not in a workspace, or cm is missing); Private / Ignored when
+    /// listed PR / IG; CheckedOut when it already has a pending controlled change here
+    /// (checked out, added, copied, replaced, or moved), so it needs no checkout; otherwise
+    /// Controlled (unchanged files are not listed at all, and a file changed without a
+    /// checkout is listed CH).
+    /// <para>
+    /// <c>cm status --short</c> cannot answer this: it lists only paths with changes, so an
+    /// unchanged controlled file reads as untracked.
+    /// </para>
+    /// </summary>
+    private static CmState LocalStateFrom(CommandRunner.Result result, string path)
     {
-        if (result.ExitCode != 0) return false;
-        var lines = result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        return lines.Length > 0 && !lines[0].TrimStart().StartsWith('?');
+        if (result.ExitCode != 0) return CmState.Outside;
+        var info = FindStatusInfo(result.Output, path);
+        if (info is null) return CmState.Controlled;
+        if (!info.Value.Tracked) return info.Value.Ignored ? CmState.Ignored : CmState.Private;
+        return info.Value.CheckedOut ? CmState.CheckedOut : CmState.Controlled;
     }
+
+    /// <summary>
+    /// The <c>cm status</c> line for one path: matched by absolute path, else by file name
+    /// when exactly one listed path has it. A folder's listing can include its contents, so
+    /// the first line is not necessarily the path asked about.
+    /// </summary>
+    private static CmStatusInfo? FindStatusInfo(string output, string path)
+    {
+        var abs = Path.GetFullPath(path);
+        var name = Path.GetFileName(abs);
+        var sameName = new List<CmStatusInfo>();
+        foreach (var line in output.Split('\n'))
+        {
+            var parsed = ParseCmStatusLine(line);
+            if (parsed is null) continue;
+            foreach (var p in parsed.Value.Paths)
+            {
+                var listed = Path.GetFullPath(p);
+                if (PathComparer.Equals(listed, abs)) return parsed.Value.Info;
+                if (Path.GetFileName(listed) == name) sameName.Add(parsed.Value.Info);
+            }
+        }
+        return sameName.Count == 1 ? sameName[0] : null;
+    }
+
+    /// <summary>Compares absolute paths as cm prints them: case-insensitive on Windows.</summary>
+    private static readonly StringComparer PathComparer =
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     private static CommandRunner.Result Cm(string[] args) =>
         CommandRunner.Run("cm", args);
@@ -231,6 +261,11 @@ public partial class PlasticProvider : IVCProvider
         ["CH", "CO", "AD", "CP", "RP", "MV", "DE", "LD", "LM"];
     /// <summary>codes meaning the path is not under version control.</summary>
     private static readonly HashSet<string> PlasticUntrackedCodes = ["PR", "IG"];
+    /// <summary>codes for a pending controlled change in this workspace that needs no <c>cm co</c>.</summary>
+    private static readonly HashSet<string> PlasticCheckedOutCodes = ["CO", "AD", "CP", "RP", "MV"];
+
+    /// <summary>What one <c>cm status</c> line says about its path(s).</summary>
+    private readonly record struct CmStatusInfo(bool Tracked, bool Dirty, bool CheckedOut, bool Ignored);
 
     /// <summary>fileinfo format whose fields the parser reads positionally (see UEPlasticPlugin).</summary>
     private const string FileinfoFormat =
@@ -285,8 +320,8 @@ public partial class PlasticProvider : IVCProvider
     /// <summary>Assemble the local (tracked / dirty) base statuses from <c>cm status</c> output.</summary>
     private static List<PlasticBase> BuildPlasticBases(CommandRunner.Result result, IReadOnlyList<string> filePaths)
     {
-        var byPath = new Dictionary<string, (bool Tracked, bool Dirty)>();
-        var byBase = new Dictionary<string, List<(bool Tracked, bool Dirty)>>();
+        var byPath = new Dictionary<string, CmStatusInfo>(PathComparer);
+        var byBase = new Dictionary<string, List<CmStatusInfo>>();
         if (result.ExitCode == 0 && result.Output.Length > 0)
         {
             foreach (var line in result.Output.Split('\n'))
@@ -309,7 +344,7 @@ public partial class PlasticProvider : IVCProvider
         {
             var abs = Path.GetFullPath(filePath);
             var writable = FileStatusHelpers.WritableBit(abs);
-            (bool Tracked, bool Dirty)? info = null;
+            CmStatusInfo? info = null;
             if (byPath.TryGetValue(abs, out var direct)) info = direct;
             else if (byBase.TryGetValue(Path.GetFileName(abs), out var same) && same.Count == 1) info = same[0];
 
@@ -406,20 +441,23 @@ public partial class PlasticProvider : IVCProvider
     /// <summary>
     /// Parse one <c>cm status --machinereadable</c> line into a classification and the
     /// path(s) it concerns. Returns null for header / blank / unrecognised lines.
-    /// A move (<c>MV "src" "dst"</c>) carries two quoted paths; both are flagged.
+    /// A move (<c>MV "src" "dst"</c>) carries two quoted paths; both are flagged. A combined
+    /// code such as <c>CO+CH</c> (a checked-out file whose contents changed, printed with
+    /// <c>--iscochanged</c>) counts as each of its parts.
     /// </summary>
-    private static ((bool Tracked, bool Dirty) Info, List<string> Paths)? ParseCmStatusLine(string line)
+    private static (CmStatusInfo Info, List<string> Paths)? ParseCmStatusLine(string line)
     {
         var trimmed = line.Trim();
         var space = trimmed.IndexOf(' ');
         if (space == -1) return null;
-        var code = trimmed[..space];
-        var dirty = PlasticDirtyCodes.Contains(code);
-        var untracked = PlasticUntrackedCodes.Contains(code);
+        var codes = trimmed[..space].Split('+');
+        var dirty = codes.Any(PlasticDirtyCodes.Contains);
+        var untracked = codes.Any(PlasticUntrackedCodes.Contains);
         if (!dirty && !untracked) return null; // STATUS header, blank, or unknown code
         var rest = trimmed[(space + 1)..].Trim();
         var quoted = QuotedPathRegex().Matches(rest).Select(m => m.Groups[1].Value).ToList();
         var paths = quoted.Count > 0 ? quoted : [rest];
-        return ((!untracked, dirty), paths);
+        var checkedOut = !untracked && codes.Any(PlasticCheckedOutCodes.Contains);
+        return (new CmStatusInfo(!untracked, dirty, checkedOut, codes.Contains("IG")), paths);
     }
 }
