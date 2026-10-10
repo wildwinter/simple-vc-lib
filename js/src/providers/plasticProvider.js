@@ -313,8 +313,8 @@ export class PlasticProvider {
 
   /**
    * Status for a batch of files in ONE `cm status --machinereadable --all --ignored`
-   * spawn. The machine format lists one item per line as `<2-letter code> <path>`
-   * (absolute paths, quoted when they contain spaces).
+   * spawn. The machine format lists one item per line, its fields split by the separator
+   * we ask for: code, absolute path (unquoted), and two merge flags (see parseCmStatusLine).
    *
    * Flag choice matters: `cm status` defaults to `--controlledchanged`, which omits
    * a content-modified-but-not-checked-out file (CH) and local deletes/moves. `--all`
@@ -326,8 +326,9 @@ export class PlasticProvider {
    * files (plus one `cm whoami`) to fill `outOfDate` (loaded changeset < head) and
    * lock holder (`openedByMe` when that's us, else `lockedBy: ["user@workspace"]`).
    *
-   * NOTE: status codes, flags, and the fileinfo format are validated against the Unity
-   * VCS CLI docs / UEPlasticPlugin, not a live workspace - worth one real smoke test.
+   * NOTE: the status line format follows the Unreal Plastic plugin (UEPlasticPlugin), which
+   * runs against live workspaces; the first version here assumed quoted paths, matched no
+   * file on a real workspace, and so checked out files already checked out.
    *
    * @param {string[]} filePaths
    * @param {import('../vcStatus.js').VCStatusOptions} [options]
@@ -351,7 +352,7 @@ export class PlasticProvider {
 
 /** The local `cm status` argument list. */
 function plasticStatusArgs(filePaths) {
-  return ['status', '--machinereadable', '--all', '--ignored', ...filePaths.map((p) => resolve(p))];
+  return ['status', '--machinereadable', `--fieldseparator=${STATUS_SEPARATOR}`, '--all', '--ignored', ...filePaths.map((p) => resolve(p))];
 }
 
 /**
@@ -481,27 +482,53 @@ const PLASTIC_UNTRACKED_CODES = new Set(['PR', 'IG']);
 /** Codes for a pending controlled change in this workspace that needs no `cm co`. */
 const PLASTIC_CHECKED_OUT_CODES = new Set(['CO', 'AD', 'CP', 'RP', 'MV']);
 
+/** The field separator `cm status` is asked for: one no Plastic code or flag contains, and the one the
+ *  Unreal Plastic plugin uses, so the format is the one cm is known to print. */
+const STATUS_SEPARATOR = ';';
+
 /**
- * Parse one `cm status --machinereadable` line into a classification and the
- * path(s) it concerns. Returns null for the header / blank / unrecognised lines.
- * A move (`MV "src" "dst"`) carries two quoted paths; both are flagged. A combined
- * code such as `CO+CH` (a checked-out file whose contents changed, printed with
- * `--iscochanged`) counts as each of its parts.
+ * Parse one `cm status --machinereadable --fieldseparator=;` line into a classification and the path(s)
+ * it concerns. Returns null for the header / blank / unrecognised lines. The fields are the code, the
+ * path, and two flags (whether the item has merges, and which):
+ *
+ *   CO;c:\ws\Content\scene.patterx;False;NO_MERGES
+ *   CO+CH;c:\ws\Content\scene.patterx;False;NO_MERGES
+ *   MV;100%;c:\ws\old.patterx;c:\ws\new.patterx;False;NO_MERGES
+ *
+ * A move carries its similarity and both paths; both are flagged. A combined code such as `CO+CH` (a
+ * checked-out file whose contents changed, printed with `--iscochanged`) counts as each of its parts.
+ * Paths are not quoted, so a separator inside a path (a `;` in a Windows file name) is joined back. A
+ * line with no separator at all is read as `CODE PATH`, for a cm that ignores the separator option.
  *
  * @param {string} line
  * @returns {{info: {tracked: boolean, dirty: boolean, checkedOut: boolean, ignored: boolean}, paths: string[]} | null}
  */
 function parseCmStatusLine(line) {
   const trimmed = line.trim();
-  const space = trimmed.indexOf(' ');
-  if (space === -1) return null;
-  const codes = trimmed.slice(0, space).split('+');
+  if (!trimmed) return null;
+  let fields;
+  if (trimmed.includes(STATUS_SEPARATOR)) {
+    fields = trimmed.split(STATUS_SEPARATOR);
+  } else {
+    const space = trimmed.indexOf(' ');
+    if (space === -1) return null;
+    fields = [trimmed.slice(0, space), trimmed.slice(space + 1).replace(/\s+(True|False)\s+\S+$/i, '')];
+  }
+  const codes = fields[0].trim().split('+');
   const dirty = codes.some((c) => PLASTIC_DIRTY_CODES.has(c));
   const untracked = codes.some((c) => PLASTIC_UNTRACKED_CODES.has(c));
   if (!dirty && !untracked) return null; // STATUS header, blank, or unknown code
-  const rest = trimmed.slice(space + 1).trim();
-  const quoted = [...rest.matchAll(/"([^"]*)"/g)].map((m) => m[1]);
-  const paths = quoted.length > 0 ? quoted : [rest];
+  let rest = fields.slice(1);
+  if (rest.length >= 3 && /^(true|false)$/i.test(rest[rest.length - 2].trim())) rest = rest.slice(0, -2); // the merge flags
+  let paths;
+  if (codes.includes('MV')) {
+    if (rest.length > 0 && /^\d+%$/.test(rest[0].trim())) rest = rest.slice(1); // the similarity
+    paths = rest.length >= 2 ? [rest.slice(0, -1).join(STATUS_SEPARATOR), rest[rest.length - 1]] : rest;
+  } else {
+    paths = [rest.join(STATUS_SEPARATOR)];
+  }
+  paths = paths.map((p) => p.trim().replace(/^"(.*)"$/, '$1')).filter((p) => p.length > 0);
+  if (paths.length === 0) return null;
   const checkedOut = !untracked && codes.some((c) => PLASTIC_CHECKED_OUT_CODES.has(c));
   return { info: { tracked: !untracked, dirty, checkedOut, ignored: codes.includes('IG') }, paths };
 }

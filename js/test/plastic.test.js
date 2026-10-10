@@ -45,8 +45,10 @@ function fakeCm(root, states = new Map()) {
       return { exitCode: 1, output: '', error: 'The path is not in a workspace.' };
     switch (args[0]) {
       case 'status': {
-        const lines = paths.flatMap((p) => states.has(resolve(p)) ? [`${states.get(resolve(p))} "${resolve(p)}"`] : []);
-        return { exitCode: 0, output: ['STATUS 7 /main rep:game@local', ...lines].join('\n'), error: '' };
+        // The real machine format (as the Unreal Plastic plugin reads it): code;path;merge flags.
+        if (!args.includes('--fieldseparator=;')) return { exitCode: 1, output: '', error: 'expected --fieldseparator=;' };
+        const lines = paths.flatMap((p) => states.has(resolve(p)) ? [`${states.get(resolve(p))};${resolve(p)};False;NO_MERGES`] : []);
+        return { exitCode: 0, output: ['STATUS;7;game;local', ...lines].join('\n'), error: '' };
       }
       case 'co': {
         const p = resolve(paths[0]);
@@ -185,12 +187,73 @@ describe('Plastic SCM writes (simulated cm)', () => {
     setCommandRunner((command, args) => {
       calls.push(`${command} ${args[0]}`);
       return args[0] === 'status'
-        ? { exitCode: 0, output: `PR "${join(folder, 'scratch.txt')}"\nCO "${file}"`, error: '' }
+        ? { exitCode: 0, output: `PR;${join(folder, 'scratch.txt')};False;NO_MERGES\nCO;${file};False;NO_MERGES`, error: '' }
         : { exitCode: 0, output: '', error: '' };
     });
 
     // the folder itself is unlisted, so controlled; its private child must not make it private
     assert.isTrue(new PlasticProvider().deleteFolder(folder).success);
     assert.include(calls, 'cm remove');
+  });
+});
+
+// The lines a real cm prints, from the Unreal Plastic plugin's own examples. The first version of the
+// provider assumed quoted paths, so on a real workspace no line ever matched its file: every file read as
+// unchanged, and was checked out again on every save.
+describe('Plastic SCM status lines (the real machine format)', () => {
+  beforeEach(() => setProvider(new PlasticProvider()));
+  afterEach(() => {
+    clearProvider();
+    clearCommandRunner();
+  });
+
+  const answering = (output) => {
+    const calls = [];
+    setCommandRunner((command, args) => {
+      calls.push(`${command} ${args[0]}`);
+      return args[0] === 'status' ? { exitCode: 0, output, error: '' } : { exitCode: 0, output: '', error: '' };
+    });
+    return calls;
+  };
+
+  it('reads a checked-out file, path with spaces and merge flags, as checked out', () => {
+    const file = controlledFile(makeWorkspace(), 'my scene.patterx');
+    const calls = answering(`STATUS;41;UEPlasticPluginDev;localhost:8087\nCO;${resolve(file)};False;NO_MERGES`);
+    assert.isTrue(prepareToWrite(file).success);
+    assert.notInclude(calls, 'cm co');
+  });
+
+  it('reads CO+CH and a changed (CH) file apart', () => {
+    const file = controlledFile(makeWorkspace(), 'scene.patterx');
+    let calls = answering(`CO+CH;${resolve(file)};False;NO_MERGES`);
+    assert.isTrue(prepareToWrite(file).success);
+    assert.notInclude(calls, 'cm co');
+    calls = answering(`CH;${resolve(file)};False;NO_MERGES`);
+    assert.isTrue(prepareToWrite(file).success);
+    assert.include(calls, 'cm co');
+  });
+
+  it('reads a move by its destination, past the similarity, with or without the flags', () => {
+    const dir = makeWorkspace();
+    const moved = controlledFile(dir, 'moved.patterx');
+    for (const tail of [';False;NO_MERGES', '']) {
+      const calls = answering(`MV;100%;${join(dir, 'old.patterx')};${resolve(moved)}${tail}`);
+      assert.isTrue(prepareToWrite(moved).success);
+      assert.notInclude(calls, 'cm co');
+    }
+  });
+
+  it('keeps a path that has the separator in it whole', () => {
+    const file = controlledFile(makeWorkspace(), 'a;b.patterx');
+    const calls = answering(`CO;${resolve(file)};False;NO_MERGES`);
+    assert.isTrue(prepareToWrite(file).success);
+    assert.notInclude(calls, 'cm co');
+  });
+
+  it('still reads a line with no separator as code and path', () => {
+    const file = controlledFile(makeWorkspace(), 'scene.patterx');
+    const calls = answering(`CO ${resolve(file)} False NO_MERGES`);
+    assert.isTrue(prepareToWrite(file).success);
+    assert.notInclude(calls, 'cm co');
   });
 });

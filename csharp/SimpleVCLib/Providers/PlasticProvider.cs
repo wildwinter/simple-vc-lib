@@ -253,8 +253,6 @@ public partial class PlasticProvider : IVCProvider
     private static Task<CommandRunner.Result> CmAsync(string[] args) =>
         CommandRunner.RunAsync("cm", args);
 
-    [GeneratedRegex("\"([^\"]*)\"")]
-    private static partial Regex QuotedPathRegex();
 
     /// <summary>cm status codes for a controlled file with a pending change.</summary>
     private static readonly HashSet<string> PlasticDirtyCodes =
@@ -275,8 +273,8 @@ public partial class PlasticProvider : IVCProvider
 
     /// <summary>
     /// Status for a batch of files in ONE <c>cm status --machinereadable --all --ignored</c>
-    /// spawn. The machine format lists one item per line as
-    /// <c>&lt;2-letter code&gt; &lt;path&gt;</c> (absolute paths, quoted when they contain spaces).
+    /// spawn. The machine format lists one item per line, its fields split by the separator we ask
+    /// for: code, absolute path (unquoted), and two merge flags (see <see cref="ParseCmStatusLine"/>).
     /// <para>
     /// Flag choice matters: <c>cm status</c> defaults to <c>--controlledchanged</c>, which
     /// omits a content-modified-but-not-checked-out file (CH) and local deletes/moves.
@@ -291,8 +289,9 @@ public partial class PlasticProvider : IVCProvider
     /// <c>LockedBy: ["user@workspace"]</c>).
     /// </para>
     /// <para>
-    /// NOTE: status codes, flags, and the fileinfo format are validated against the Unity
-    /// VCS CLI docs / UEPlasticPlugin, not a live workspace - worth one real smoke test.
+    /// NOTE: the status line format follows the Unreal Plastic plugin (UEPlasticPlugin), which runs
+    /// against live workspaces; the first version here assumed quoted paths, matched no file on a real
+    /// workspace, and so checked out files already checked out.
     /// </para>
     /// </summary>
     public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths, bool remote = false)
@@ -313,7 +312,7 @@ public partial class PlasticProvider : IVCProvider
     }
 
     private static string[] PlasticStatusArgs(IReadOnlyList<string> filePaths) =>
-        ["status", "--machinereadable", "--all", "--ignored", .. filePaths.Select(Path.GetFullPath)];
+        ["status", "--machinereadable", $"--fieldseparator={StatusSeparator}", "--all", "--ignored", .. filePaths.Select(Path.GetFullPath)];
 
     private readonly record struct PlasticBase(string Abs, bool Writable, bool? Tracked, bool? Dirty);
 
@@ -438,26 +437,60 @@ public partial class PlasticProvider : IVCProvider
         return r.ExitCode == 0 ? r.Output.Trim() : "";
     }
 
+    /// <summary>The field separator <c>cm status</c> is asked for: one no Plastic code or flag contains, and
+    /// the one the Unreal Plastic plugin uses, so the format is the one cm is known to print.</summary>
+    private const string StatusSeparator = ";";
+
+    [GeneratedRegex(@"\s+(True|False)\s+\S+$", RegexOptions.IgnoreCase)]
+    private static partial Regex TrailingFlagsRegex();
+
     /// <summary>
-    /// Parse one <c>cm status --machinereadable</c> line into a classification and the
-    /// path(s) it concerns. Returns null for header / blank / unrecognised lines.
-    /// A move (<c>MV "src" "dst"</c>) carries two quoted paths; both are flagged. A combined
-    /// code such as <c>CO+CH</c> (a checked-out file whose contents changed, printed with
-    /// <c>--iscochanged</c>) counts as each of its parts.
+    /// Parse one <c>cm status --machinereadable --fieldseparator=;</c> line into a classification and the
+    /// path(s) it concerns. Returns null for header / blank / unrecognised lines. The fields are the code,
+    /// the path, and two flags (whether the item has merges, and which):
+    /// <c>CO;c:\ws\scene.patterx;False;NO_MERGES</c>, <c>CO+CH;...</c>, or for a move
+    /// <c>MV;100%;c:\ws\old.patterx;c:\ws\new.patterx;False;NO_MERGES</c>.
+    /// <para>
+    /// A move carries its similarity and both paths; both are flagged. A combined code such as
+    /// <c>CO+CH</c> counts as each of its parts. Paths are not quoted, so a separator inside a path (a
+    /// <c>;</c> in a Windows file name) is joined back. A line with no separator at all is read as
+    /// <c>CODE PATH</c>, for a cm that ignores the separator option.
+    /// </para>
     /// </summary>
     private static (CmStatusInfo Info, List<string> Paths)? ParseCmStatusLine(string line)
     {
         var trimmed = line.Trim();
-        var space = trimmed.IndexOf(' ');
-        if (space == -1) return null;
-        var codes = trimmed[..space].Split('+');
+        if (trimmed.Length == 0) return null;
+        string[] fields;
+        if (trimmed.Contains(StatusSeparator)) fields = trimmed.Split(StatusSeparator);
+        else
+        {
+            var space = trimmed.IndexOf(' ');
+            if (space == -1) return null;
+            fields = [trimmed[..space], TrailingFlagsRegex().Replace(trimmed[(space + 1)..], "")];
+        }
+        var codes = fields[0].Trim().Split('+');
         var dirty = codes.Any(PlasticDirtyCodes.Contains);
         var untracked = codes.Any(PlasticUntrackedCodes.Contains);
         if (!dirty && !untracked) return null; // STATUS header, blank, or unknown code
-        var rest = trimmed[(space + 1)..].Trim();
-        var quoted = QuotedPathRegex().Matches(rest).Select(m => m.Groups[1].Value).ToList();
-        var paths = quoted.Count > 0 ? quoted : [rest];
+        var rest = fields.Skip(1).ToList();
+        if (rest.Count >= 3 && (rest[^2].Trim().Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                                rest[^2].Trim().Equals("false", StringComparison.OrdinalIgnoreCase)))
+            rest = rest.Take(rest.Count - 2).ToList(); // the merge flags
+        List<string> paths;
+        if (codes.Contains("MV"))
+        {
+            if (rest.Count > 0 && SimilarityRegex().IsMatch(rest[0].Trim())) rest = rest.Skip(1).ToList(); // the similarity
+            paths = rest.Count >= 2 ? [string.Join(StatusSeparator, rest.Take(rest.Count - 1)), rest[^1]] : rest;
+        }
+        else paths = [string.Join(StatusSeparator, rest)];
+        paths = paths.Select(p => p.Trim()).Select(p => p.Length >= 2 && p[0] == '"' && p[^1] == '"' ? p[1..^1] : p)
+            .Where(p => p.Length > 0).ToList();
+        if (paths.Count == 0) return null;
         var checkedOut = !untracked && codes.Any(PlasticCheckedOutCodes.Contains);
         return (new CmStatusInfo(!untracked, dirty, checkedOut, codes.Contains("IG")), paths);
     }
+
+    [GeneratedRegex(@"^\d+%$")]
+    private static partial Regex SimilarityRegex();
 }

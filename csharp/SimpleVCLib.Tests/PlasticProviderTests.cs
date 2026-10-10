@@ -49,8 +49,10 @@ public class PlasticProviderTests : IDisposable
             switch (args[0])
             {
                 case "status":
-                    var lines = paths.Where(states.ContainsKey).Select(p => $"{states[p]} \"{p}\"");
-                    return new CommandResult(0, string.Join('\n', ["STATUS 7 /main rep:game@local", .. lines]), "");
+                    // The real machine format (as the Unreal Plastic plugin reads it): code;path;merge flags.
+                    if (!args.Contains("--fieldseparator=;")) return new CommandResult(1, "", "expected --fieldseparator=;");
+                    var lines = paths.Where(states.ContainsKey).Select(p => $"{states[p]};{p};False;NO_MERGES");
+                    return new CommandResult(0, string.Join('\n', ["STATUS;7;game;local", .. lines]), "");
                 case "co":
                     if (states.TryGetValue(paths[0], out var code) && code == "CO")
                         return new CommandResult(1, "", $"The item {paths[0]} is exclusively checked out by you in this workspace.");
@@ -198,12 +200,78 @@ public class PlasticProviderTests : IDisposable
         {
             calls.Add($"{command} {args[0]}");
             return args[0] == "status"
-                ? new CommandResult(0, $"PR \"{Path.Combine(folder, "scratch.txt")}\"\nCO \"{file}\"", "")
+                ? new CommandResult(0, $"PR;{Path.Combine(folder, "scratch.txt")};False;NO_MERGES\nCO;{file};False;NO_MERGES", "")
                 : new CommandResult(0, "", "");
         });
 
         // the folder itself is unlisted, so controlled; its private child must not make it private
         Assert.True(new PlasticProvider().DeleteFolder(folder).Success);
         Assert.Contains("cm remove", calls);
+    }
+
+    // -- The lines a real cm prints, from the Unreal Plastic plugin's own examples. The first version assumed
+    // quoted paths, so on a real workspace no line matched its file and every save checked out again. -----
+
+    private static List<string> Answering(string output)
+    {
+        var calls = new List<string>();
+        VCLib.SetCommandRunner((command, args) =>
+        {
+            calls.Add($"{command} {args[0]}");
+            return args[0] == "status" ? new CommandResult(0, output, "") : new CommandResult(0, "", "");
+        });
+        return calls;
+    }
+
+    [Fact]
+    public void ReadsACheckedOutFileWithSpacesAndMergeFlagsAsCheckedOut()
+    {
+        var file = ControlledFile(TestHelpers.MakeTempDir(), "my scene.patterx");
+        var calls = Answering($"STATUS;41;UEPlasticPluginDev;localhost:8087\nCO;{Path.GetFullPath(file)};False;NO_MERGES");
+        Assert.True(VCLib.PrepareToWrite(file).Success);
+        Assert.DoesNotContain("cm co", calls);
+    }
+
+    [Fact]
+    public void ReadsCoChAndChApart()
+    {
+        var file = ControlledFile(TestHelpers.MakeTempDir(), "scene.patterx");
+        var calls = Answering($"CO+CH;{Path.GetFullPath(file)};False;NO_MERGES");
+        Assert.True(VCLib.PrepareToWrite(file).Success);
+        Assert.DoesNotContain("cm co", calls);
+        calls = Answering($"CH;{Path.GetFullPath(file)};False;NO_MERGES");
+        Assert.True(VCLib.PrepareToWrite(file).Success);
+        Assert.Contains("cm co", calls);
+    }
+
+    [Fact]
+    public void ReadsAMoveByItsDestinationWithOrWithoutTheFlags()
+    {
+        var dir = TestHelpers.MakeTempDir();
+        var moved = ControlledFile(dir, "moved.patterx");
+        foreach (var tail in new[] { ";False;NO_MERGES", "" })
+        {
+            var calls = Answering($"MV;100%;{Path.Combine(dir, "old.patterx")};{Path.GetFullPath(moved)}{tail}");
+            Assert.True(VCLib.PrepareToWrite(moved).Success);
+            Assert.DoesNotContain("cm co", calls);
+        }
+    }
+
+    [Fact]
+    public void KeepsAPathWithTheSeparatorInItWhole()
+    {
+        var file = ControlledFile(TestHelpers.MakeTempDir(), "a;b.patterx");
+        var calls = Answering($"CO;{Path.GetFullPath(file)};False;NO_MERGES");
+        Assert.True(VCLib.PrepareToWrite(file).Success);
+        Assert.DoesNotContain("cm co", calls);
+    }
+
+    [Fact]
+    public void StillReadsALineWithNoSeparatorAsCodeAndPath()
+    {
+        var file = ControlledFile(TestHelpers.MakeTempDir(), "scene.patterx");
+        var calls = Answering($"CO {Path.GetFullPath(file)} False NO_MERGES");
+        Assert.True(VCLib.PrepareToWrite(file).Success);
+        Assert.DoesNotContain("cm co", calls);
     }
 }

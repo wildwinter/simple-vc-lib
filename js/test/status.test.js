@@ -380,9 +380,9 @@ describe('fileStatus (plastic, canned machinereadable)', () => {
   it('classifies changed / checked-out / private', () => {
     setCommandRunner(cannedCm([
       'STATUS 23 /main rep:default@server',
-      'CH "/ws/wc/changed.txt"',
-      'CO "/ws/wc/checkedout.txt"',
-      'PR "/ws/wc/new.txt"',
+      'CH;/ws/wc/changed.txt;False;NO_MERGES',
+      'CO;/ws/wc/checkedout.txt;False;NO_MERGES',
+      'PR;/ws/wc/new.txt;False;NO_MERGES',
     ].join('\n')));
     const [changed, checkedOut, priv] = fileStatus([
       '/ws/wc/changed.txt', '/ws/wc/checkedout.txt', '/ws/wc/new.txt',
@@ -416,7 +416,7 @@ describe('fileStatus (plastic, canned machinereadable)', () => {
     setCommandRunner((command, args) => {
       calls++;
       assert.equal(command, 'cm');
-      assert.deepEqual(args.slice(0, 4), ['status', '--machinereadable', '--all', '--ignored']);
+      assert.deepEqual(args.slice(0, 5), ['status', '--machinereadable', '--fieldseparator=;', '--all', '--ignored']);
       return { exitCode: 0, output: '', error: '' };
     });
     fileStatus(['/ws/wc/a.txt', '/ws/wc/b.txt']);
@@ -437,7 +437,7 @@ describe('fileStatus (plastic, canned machinereadable)', () => {
   it('with { remote: true } fills outOfDate + lockedBy (other) and openedByMe (self)', () => {
     setCommandRunner(cannedCmRemote({
       // Both checked out, so both are controlled and get a fileinfo line, in input order.
-      status: 'CH "/ws/wc/a.txt"\nCO "/ws/wc/b.txt"',
+      status: 'CH;/ws/wc/a.txt;False;NO_MERGES\nCO;/ws/wc/b.txt;False;NO_MERGES',
       fileinfo: '3;7;rep@srv;bob;bob-ws;/a.txt\n7;7;rep@srv;ian;ian-ws;/b.txt',
       whoami: 'ian',
     }));
@@ -455,7 +455,7 @@ describe('fileStatus (plastic, canned machinereadable)', () => {
     let calledFileinfo = false;
     setCommandRunner((command, args) => {
       if (command === 'cm' && args[0] === 'fileinfo') calledFileinfo = true;
-      if (command === 'cm' && args[0] === 'status') return { exitCode: 0, output: 'CH "/ws/wc/a.txt"', error: '' };
+      if (command === 'cm' && args[0] === 'status') return { exitCode: 0, output: 'CH;/ws/wc/a.txt;False;NO_MERGES', error: '' };
       return { exitCode: 0, output: '', error: '' };
     });
     const [st] = fileStatus(['/ws/wc/a.txt']);
@@ -539,7 +539,7 @@ describe('fileStatusAsync', () => {
     setProvider(new PlasticProvider());
     setCommandRunner((command, args) => {
       if (command !== 'cm') return { exitCode: 1, output: '', error: 'no' };
-      if (args[0] === 'status') return { exitCode: 0, output: 'CH "/ws/wc/a.txt"', error: '' };
+      if (args[0] === 'status') return { exitCode: 0, output: 'CH;/ws/wc/a.txt;False;NO_MERGES', error: '' };
       if (args[0] === 'fileinfo') return { exitCode: 0, output: '3;7;rep@srv;bob;bob-ws;/a.txt', error: '' };
       if (args[0] === 'whoami') return { exitCode: 0, output: 'ian', error: '' };
       return { exitCode: 1, output: '', error: 'unexpected' };

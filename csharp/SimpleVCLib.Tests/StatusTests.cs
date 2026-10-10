@@ -420,10 +420,10 @@ public class StatusTests : IDisposable
         var priv = Path.Combine(dir, "new.txt");
         VCLib.SetProvider(new PlasticProvider());
         VCLib.SetCommandRunner(CannedCm(string.Join('\n',
-            "STATUS 23 /main rep:default@server",
-            $"CH \"{changed}\"",
-            $"CO \"{checkedOut}\"",
-            $"PR \"{priv}\"")));
+            "STATUS;23;default;server",
+            $"CH;{changed};False;NO_MERGES",
+            $"CO;{checkedOut};False;NO_MERGES",
+            $"PR;{priv};False;NO_MERGES")));
         var statuses = VCLib.FileStatus([changed, checkedOut, priv]);
         Assert.Equal("plastic", statuses[0].System);
         Assert.True(statuses[0].Tracked);
@@ -480,7 +480,7 @@ public class StatusTests : IDisposable
         var b = Path.Combine(dir, "b.txt");
         VCLib.SetProvider(new PlasticProvider());
         VCLib.SetCommandRunner(CannedCmRemote(
-            status: $"CH \"{a}\"\nCO \"{b}\"",
+            status: $"CH;{a};False;NO_MERGES\nCO;{b};False;NO_MERGES",
             fileinfo: "3;7;rep@srv;bob;bob-ws;/a.txt\n7;7;rep@srv;ian;ian-ws;/b.txt",
             whoami: "ian"));
         var statuses = VCLib.FileStatus([a, b], remote: true);
@@ -501,7 +501,7 @@ public class StatusTests : IDisposable
         VCLib.SetCommandRunner((command, args) =>
         {
             if (command == "cm" && args[0] == "fileinfo") calledFileinfo = true;
-            if (command == "cm" && args[0] == "status") return new CommandResult(0, $"CH \"{a}\"", "");
+            if (command == "cm" && args[0] == "status") return new CommandResult(0, $"CH;{a};False;NO_MERGES", "");
             return new CommandResult(0, "", "");
         });
         var st = VCLib.FileStatus([a])[0];
@@ -565,7 +565,7 @@ public class StatusTests : IDisposable
         var a = Path.Combine(TestHelpers.MakeTempDir(), "a.txt");
         VCLib.SetProvider(new PlasticProvider());
         VCLib.SetCommandRunner(CannedCmRemote(
-            status: $"CH \"{a}\"",
+            status: $"CH;{a};False;NO_MERGES",
             fileinfo: "3;7;rep@srv;bob;bob-ws;/a.txt",
             whoami: "ian"));
         var st = (await VCLib.FileStatusAsync([a], remote: true))[0];
