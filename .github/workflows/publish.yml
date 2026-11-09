@@ -1,29 +1,94 @@
 name: Publish
 
-# Publishes @wildwinter/simple-vc-lib (the js package) to GitHub Packages when
-# a GitHub Release is published - the same pattern as the expr repo. Bump
-# js/package.json's version before tagging; the publish is guarded so a rerun
-# (or a release that doesn't bump) skips instead of failing on a republish.
+# Publishes both runtimes when a GitHub Release is published:
+#   - the js package @wildwinter/simple-vc-lib to npmjs and to GitHub Packages;
+#   - the C# package wildwinter.SimpleVCLib to nuget.org.
+# Set the version in the root package.json, run `npm run sync-version` and commit
+# before tagging vX.Y.Z; the `versions` job refuses to publish if the root,
+# js/package.json and the .csproj disagree, or don't match the tag. Every publish
+# skips a version its registry already has, so a rerun, or a release that
+# doesn't bump, skips instead of failing.
 #
-# npmjs publishing happens via the local `npm run publish-npm` (js/scripts/
-# publish.mjs), which targets BOTH registries with the same guard - so either
-# path converges both registries on the current version. (To move npmjs into
-# CI too, add an NPM_TOKEN secret and a second guarded publish step against
-# registry.npmjs.org.)
+# npmjs and nuget.org both authenticate via TRUSTED PUBLISHING (OIDC): each
+# registry trusts this repo + this workflow file, so no token or API key is
+# stored anywhere. npmjs needs `id-token: write`, an OIDC-aware npm CLI
+# (>= 11.5.1) and js/package.json's repository.url matching this repo, and
+# generates provenance by itself. nuget.org needs `id-token: write` and the
+# NuGet/login action, which swaps the OIDC token for a short-lived API key.
+# Renaming this file breaks both trusted publishers.
 #
-# The Perforce test suite self-skips when no p4 workspace is available.
+# The npmjs and GitHub Packages publishes are separate jobs on purpose: the
+# GitHub Packages job maps the @wildwinter scope to npm.pkg.github.com, and a
+# scope mapping overrides --registry, so a shared job would send the npmjs
+# publish to the wrong place.
+#
+# `workflow_dispatch` reruns the publish for the version currently on main, for
+# when a release's own run failed: a registry that has it already is skipped.
+#
+# The Perforce test suites self-skip when no p4 workspace is available.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  publish:
+  versions:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Root, js and C# versions agree, and match the release tag
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          JS=$(node -p "require('./js/package.json').version")
+          CS=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' csharp/SimpleVCLib/SimpleVCLib.csproj)
+          echo "root $VER, js $JS, csharp $CS"
+          if [ "$JS" != "$VER" ] || [ "$CS" != "$VER" ]; then
+            echo "::error::Versions disagree: run npm run sync-version and commit before releasing."
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" = "release" ] && [ "${{ github.event.release.tag_name }}" != "v$VER" ]; then
+            echo "::error::Release tag ${{ github.event.release.tag_name }} doesn't match version v$VER."
+            exit 1
+          fi
+
+  npmjs:
+    needs: versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write        # npm trusted publishing (OIDC) + provenance
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: js/package-lock.json
+      # Needs >= 11.5.1 for OIDC trusted publishing. Pinned to the 11.x line on
+      # purpose: npm 12.0.0 ships a broken provenance path ("Cannot find module
+      # 'sigstore'"), which aborts every publish - npm/cli#9722.
+      - name: OIDC-aware npm (>= 11.5.1; pin off the broken npm 12.x)
+        run: npm install -g npm@11
+      # No token anywhere: npm's OIDC detection handles auth by itself.
+      - run: echo "# auth via npm trusted publishing (OIDC) - no token" > ~/.npmrc
+      - run: npm ci
+      - run: npm test
+      - name: Publish @wildwinter/simple-vc-lib to npmjs
+        run: node scripts/publish.mjs https://registry.npmjs.org
+
+  github-packages:
+    needs: versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     defaults:
       run:
         working-directory: js
@@ -41,12 +106,36 @@ jobs:
       - run: npm ci
       - run: npm test
       - name: Publish @wildwinter/simple-vc-lib to GitHub Packages
-        run: |
-          VER=$(node -p "require('./package.json').version")
-          if npm view "@wildwinter/simple-vc-lib@$VER" version >/dev/null 2>&1; then
-            echo "@wildwinter/simple-vc-lib@$VER already on GitHub Packages; skipping."
-          else
-            node scripts/publish.mjs https://npm.pkg.github.com
-          fi
+        run: node scripts/publish.mjs https://npm.pkg.github.com
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  nuget:
+    needs: versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write        # nuget.org trusted publishing (OIDC)
+    defaults:
+      run:
+        working-directory: csharp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet test ./SimpleVCLib.Tests/SimpleVCLib.Tests.csproj
+      - run: dotnet pack -c Release ./SimpleVCLib/SimpleVCLib.csproj -o ./nupkg
+      # Swaps the workflow's OIDC token for a short-lived nuget.org API key.
+      # `user` is the nuget.org account that owns the package (not a secret).
+      - name: nuget.org trusted publishing login
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: wildwinter
+      - name: Publish wildwinter.SimpleVCLib to nuget.org
+        run: >
+          dotnet nuget push ./nupkg/*.nupkg
+          --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate

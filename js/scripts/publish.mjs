@@ -6,10 +6,13 @@
 //
 //   node scripts/publish.mjs [--dry-run] [registry-url ...]
 //
-// Auth comes from the user's ~/.npmrc: an npmjs publish token for
-// registry.npmjs.org and a GitHub token WITH write:packages for
-// npm.pkg.github.com. README/LICENSE are copied in from the repo root for the
-// pack and removed afterwards (as the old inline script did).
+// Releases normally go through .github/workflows/publish.yml, which runs this
+// once per registry: npmjs via trusted publishing (OIDC, no token) and GitHub
+// Packages via the workflow's GITHUB_TOKEN. Run locally (`npm run publish-npm`)
+// it is only a fallback, and needs auth in the user's ~/.npmrc: an npmjs
+// publish token for registry.npmjs.org and a GitHub token WITH write:packages
+// for npm.pkg.github.com. README/LICENSE are copied in from the repo root for
+// the pack and removed afterwards (as the old inline script did).
 // ---------------------------------------------------------------------------
 
 import { execFileSync } from "node:child_process";
