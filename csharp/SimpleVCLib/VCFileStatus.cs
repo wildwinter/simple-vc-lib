@@ -17,6 +17,13 @@ namespace SimpleVCLib;
 /// via <see cref="Tracked"/> = false). The cheap, local notion - it does not detect a
 /// file edited outside VC. Null when the provider cannot say.
 /// </param>
+/// <param name="Ignored">
+/// The VCS would leave this untracked file alone: an add of it, or of its folder
+/// (<c>git add -A</c>, <c>p4 reconcile</c>), would not pick it up. Set by the ignore
+/// rules (.gitignore, .p4ignore, svn:ignore, ignore.conf) and, for Perforce, by a path
+/// outside the client view. False for a tracked file. Null when the provider cannot say
+/// (the filesystem provider, a file outside any working copy).
+/// </param>
 public sealed record VCFileStatus(
     string FilePath,
     string System,
@@ -25,7 +32,8 @@ public sealed record VCFileStatus(
     bool? OpenedByMe = null,
     IReadOnlyList<string>? LockedBy = null,
     bool? OutOfDate = null,
-    bool? Dirty = null);
+    bool? Dirty = null,
+    bool? Ignored = null);
 
 internal static class FileStatusHelpers
 {

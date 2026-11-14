@@ -314,7 +314,7 @@ public partial class PlasticProvider : IVCProvider
     private static string[] PlasticStatusArgs(IReadOnlyList<string> filePaths) =>
         ["status", "--machinereadable", $"--fieldseparator={StatusSeparator}", "--all", "--ignored", .. filePaths.Select(Path.GetFullPath)];
 
-    private readonly record struct PlasticBase(string Abs, bool Writable, bool? Tracked, bool? Dirty);
+    private readonly record struct PlasticBase(string Abs, bool Writable, bool? Tracked, bool? Dirty, bool? Ignored);
 
     /// <summary>Assemble the local (tracked / dirty) base statuses from <c>cm status</c> output.</summary>
     private static List<PlasticBase> BuildPlasticBases(CommandRunner.Result result, IReadOnlyList<string> filePaths)
@@ -347,11 +347,11 @@ public partial class PlasticProvider : IVCProvider
             if (byPath.TryGetValue(abs, out var direct)) info = direct;
             else if (byBase.TryGetValue(Path.GetFileName(abs), out var same) && same.Count == 1) info = same[0];
 
-            bool? tracked = null, dirty = null;
-            if (info is not null) (tracked, dirty) = (info.Value.Tracked, info.Value.Dirty);
+            bool? tracked = null, dirty = null, ignored = null;
+            if (info is not null) (tracked, dirty, ignored) = (info.Value.Tracked, info.Value.Dirty, info.Value.Ignored);
             // Not listed by `cm status --all --ignored` = controlled, no pending change.
-            else if (File.Exists(abs)) (tracked, dirty) = (true, false);
-            return new PlasticBase(abs, writable, tracked, dirty);
+            else if (File.Exists(abs)) (tracked, dirty, ignored) = (true, false, false);
+            return new PlasticBase(abs, writable, tracked, dirty, ignored);
         }).ToList();
     }
 
@@ -362,6 +362,7 @@ public partial class PlasticProvider : IVCProvider
         {
             PlasticRemote? r = remoteByPath is not null && remoteByPath.TryGetValue(b.Abs, out var rr) ? rr : null;
             return new VCFileStatus(b.Abs, "plastic", b.Writable, Tracked: b.Tracked, Dirty: b.Dirty,
+                Ignored: b.Ignored,
                 OpenedByMe: r?.OpenedByMe == true ? true : null,
                 LockedBy: r?.LockedBy,
                 OutOfDate: r?.OutOfDate == true ? true : null);

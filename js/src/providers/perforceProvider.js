@@ -110,6 +110,41 @@ async function reopenAfterPendingDeleteAsync(filePath, info, action) {
   return errorResult('error', `Cannot reopen '${filePath}' for edit after reverting pending delete: ${editResult.error || editResult.output}`);
 }
 
+/**
+ * A refusal under an exclusive (+l) filetype: someone else already has the file open.
+ * p4 reports it at exit 0 ("can't edit exclusive file already opened for edit", then
+ * "... also opened by bob@bob-ws"), so it must be read from the text. Returns a
+ * `locked` result naming the holders, or null if this is not that refusal.
+ *
+ * @param {string} filePath
+ * @param {{output: string, error: string}} result
+ */
+function exclusiveRefusal(filePath, result) {
+  const combined = (result.output || '') + '\n' + (result.error || '');
+  if (!/can't \w+ exclusive file already opened/i.test(combined)) return null;
+  const holders = [...combined.matchAll(/also opened by (\S+)/gi)].map((m) => m[1]);
+  const by = holders.length > 0 ? holders.join(', ') : 'another user';
+  return errorResult('locked', `'${filePath}' is exclusively opened by ${by}`);
+}
+
+/**
+ * True when fstat shows an exclusive (+l) file that another workspace has open, so
+ * an edit or delete here would be refused. `p4 fstat` nests the other opens one level
+ * down (`... ... otherOpen0 bob@bob-ws`).
+ *
+ * @param {string | null} info
+ */
+function exclusivelyOpenedElsewhere(info) {
+  if (!info) return false;
+  const type = info.match(/^\.\.\. headType (\S+)/m)?.[1] ?? '';
+  return /\+\w*l/.test(type) && /^(\.\.\. )+otherOpen0 /m.test(info);
+}
+
+/** The holders fstat lists in `otherOpenN`. */
+function otherOpeners(info) {
+  return [...(info ?? '').matchAll(/^(?:\.\.\. )+otherOpen\d+ (\S+)/gm)].map((m) => m[1]);
+}
+
 /** The result of the `p4 revert -a` that undoes a batch checkout. */
 function revertResult(filePath, result) {
   if (result.exitCode === 0) return okResult('File reverted in Perforce');
@@ -169,6 +204,8 @@ export class PerforceProvider {
     }
 
     const result = p4(['edit', filePath]);
+    const refused = exclusiveRefusal(filePath, result);
+    if (refused) return refused;
     if (result.exitCode === 0) return okResult();
 
     const combined = (result.output + ' ' + result.error).toLowerCase();
@@ -201,6 +238,8 @@ export class PerforceProvider {
     if (isInDepotFstat(info)) return okResult();
 
     const result = p4(['add', filePath]);
+    const refused = exclusiveRefusal(filePath, result);
+    if (refused) return refused;
     if (result.exitCode === 0) return okResult('File opened for add in Perforce');
     // File is ignored (e.g. matches a .p4ignore pattern) — treat as outside the depot.
     const combined = (result.output + ' ' + result.error).toLowerCase();
@@ -223,6 +262,8 @@ export class PerforceProvider {
     }
 
     const result = await p4Async(['edit', filePath]);
+    const refused = exclusiveRefusal(filePath, result);
+    if (refused) return refused;
     if (result.exitCode === 0) return okResult();
 
     const combined = (result.output + ' ' + result.error).toLowerCase();
@@ -252,6 +293,8 @@ export class PerforceProvider {
     if (isInDepotFstat(info)) return okResult();
 
     const result = await p4Async(['add', filePath]);
+    const refused = exclusiveRefusal(filePath, result);
+    if (refused) return refused;
     if (result.exitCode === 0) return okResult('File opened for add in Perforce');
     const combined = (result.output + ' ' + result.error).toLowerCase();
     if (combined.includes('ignored')) return fs.finishedWriteAsync(filePath);
@@ -290,6 +333,12 @@ export class PerforceProvider {
     // stale entry would abort the eventual submit and leave it locked.
     const info = fstat(filePath);
     const action = pendingAction(info);
+
+    // An exclusive file open in another workspace: `p4 delete` would be refused
+    // (at exit 0), after the local copy had already gone. Leave everything alone.
+    if (action === null && exclusivelyOpenedElsewhere(info)) {
+      return errorResult('locked', `'${filePath}' is exclusively opened by ${otherOpeners(info).join(', ') || 'another user'}`);
+    }
 
     const removeLocal = () => {
       if (!existsSync(filePath)) return null;
@@ -338,6 +387,8 @@ export class PerforceProvider {
       const localError = removeLocal();
       if (localError) return localError;
       const result = p4(['delete', filePath]);
+      const refused = exclusiveRefusal(filePath, result);
+      if (refused) return refused;
       if (result.exitCode !== 0)
         return errorResult('error', `Cannot delete '${filePath}' from Perforce: ${result.error || result.output}`);
       return okResult();
@@ -456,6 +507,10 @@ export class PerforceProvider {
     const info = await fstatAsync(filePath);
     const action = pendingAction(info);
 
+    if (action === null && exclusivelyOpenedElsewhere(info)) {
+      return errorResult('locked', `'${filePath}' is exclusively opened by ${otherOpeners(info).join(', ') || 'another user'}`);
+    }
+
     const removeLocal = () => {
       if (!existsSync(filePath)) return null;
       try {
@@ -487,6 +542,8 @@ export class PerforceProvider {
       const localError = removeLocal();
       if (localError) return localError;
       const result = await p4Async(['delete', filePath]);
+      const refused = exclusiveRefusal(filePath, result);
+      if (refused) return refused;
       if (result.exitCode !== 0)
         return errorResult('error', `Cannot delete '${filePath}' from Perforce: ${result.error || result.output}`);
       return okResult();
@@ -582,7 +639,15 @@ export class PerforceProvider {
   }
 
   /**
-   * Status for a batch of files in ONE `p4 -ztag fstat` spawn.
+   * Status for a batch of files in ONE `p4 -ztag fstat` spawn, plus one
+   * `p4 ignores -i` over any untracked files that are in the client view.
+   *
+   * `ignored` follows what `p4 add` / `p4 reconcile` would do. fstat's per-file errors
+   * say which paths are in view: "no such file(s)" is mapped but not in the depot;
+   * "not in client view" or "not under client's root" is a path p4 will never pick up,
+   * so it counts as ignored. That is the view, not the root, which matters because a
+   * client root is often a whole home folder. In-view untracked files are then
+   * checked against P4IGNORE in the one `p4 ignores` call.
    *
    * Tracked-ness follows the same rules as the write path (`isInDepotFstat`):
    * workspace-mapped is not depot-tracked; deleted-at-head is untracked unless
@@ -593,27 +658,82 @@ export class PerforceProvider {
    * @returns {import('../vcStatus.js').VCFileStatus[]}
    */
   status(filePaths) {
-    const result = p4(['-ztag', 'fstat', ...filePaths]);
-    return buildPerforceStatuses(result.output, filePaths);
+    const result = p4(['-ztag', 'fstat', ...filePaths.map((f) => resolve(f))]);
+    const { statuses, inViewUntracked } = buildPerforceStatuses(result, filePaths);
+    if (inViewUntracked.length > 0) applyP4Ignores(inViewUntracked, p4(p4IgnoresArgs(inViewUntracked)));
+    return statuses;
   }
 
-  /** Async twin of {@link status}: one `p4 -ztag fstat`, spawned without blocking. */
+  /** Async twin of {@link status}: the same p4 reads, spawned without blocking. */
   async statusAsync(filePaths) {
-    const result = await p4Async(['-ztag', 'fstat', ...filePaths]);
-    return buildPerforceStatuses(result.output, filePaths);
+    const result = await p4Async(['-ztag', 'fstat', ...filePaths.map((f) => resolve(f))]);
+    const { statuses, inViewUntracked } = buildPerforceStatuses(result, filePaths);
+    if (inViewUntracked.length > 0) applyP4Ignores(inViewUntracked, await p4Async(p4IgnoresArgs(inViewUntracked)));
+    return statuses;
   }
 }
 
 /**
- * Assemble per-file statuses from one `p4 -ztag fstat` output. Pure - shared by the
- * sync and async paths.
+ * Paths fstat's per-file errors place, from its stderr: 'unknown' for "no such
+ * file(s)" (mapped, not in the depot), 'outside' for "not in client view" and
+ * "not under client's root".
  *
- * @param {string} output
- * @param {string[]} filePaths
- * @returns {import('../vcStatus.js').VCFileStatus[]}
+ * @param {string} error
+ * @returns {Map<string, 'unknown' | 'outside'>}
  */
-function buildPerforceStatuses(output, filePaths) {
+/** A path key for matching what p4 echoes: case-insensitive on Windows. */
+function p4PathKey(p) {
+  const abs = resolve(p);
+  return process.platform === 'win32' ? abs.toLowerCase() : abs;
+}
+
+function fstatErrorPaths(error) {
+  const byPath = new Map();
+  for (const raw of (error ?? '').split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    let m = /^Path '(.+)' is not under client's root/.exec(line);
+    if (m) { byPath.set(p4PathKey(m[1]), 'outside'); continue; }
+    m = /^(.+?) - file\(s\) not in client view\.?\s*$/.exec(line);
+    if (m) { byPath.set(p4PathKey(m[1]), 'outside'); continue; }
+    m = /^(.+?) - no such file\(s\)\.?\s*$/.exec(line);
+    if (m) byPath.set(p4PathKey(m[1]), 'unknown');
+  }
+  return byPath;
+}
+
+/** `p4 ignores -i` over untracked files in the client view. */
+function p4IgnoresArgs(statuses) {
+  return ['ignores', '-i', ...statuses.map((s) => s.filePath)];
+}
+
+/**
+ * Apply one `p4 ignores -i <paths>` result: it prints `<path> ignored` for each path
+ * the ignore rules match, and nothing for the rest. A failed run leaves them unknown.
+ */
+function applyP4Ignores(statuses, result) {
+  if (result.exitCode !== 0) return;
+  const ignored = new Set();
+  for (const line of result.output.split('\n')) {
+    const m = /^(.+) ignored\s*$/.exec(line);
+    if (m) ignored.add(p4PathKey(m[1]));
+  }
+  for (const s of statuses) s.ignored = ignored.has(p4PathKey(s.filePath));
+}
+
+/**
+ * Assemble per-file statuses from one `p4 -ztag fstat` result. Pure - shared by the
+ * sync and async paths. Untracked files in the client view are also listed in
+ * `inViewUntracked`, for the `p4 ignores` pass to settle.
+ *
+ * @param {{output: string, error: string}} result
+ * @param {string[]} filePaths
+ * @returns {{statuses: import('../vcStatus.js').VCFileStatus[], inViewUntracked: import('../vcStatus.js').VCFileStatus[]}}
+ */
+function buildPerforceStatuses(result, filePaths) {
+  const output = result.output;
   const records = output ? parseZtag(output) : [];
+  const errors = fstatErrorPaths(result.error);
+  const inViewUntracked = [];
 
   const byClientFile = new Map();
     for (const record of records) {
@@ -621,7 +741,7 @@ function buildPerforceStatuses(output, filePaths) {
       if (clientFile) byClientFile.set(resolve(clientFile), record);
     }
 
-    return filePaths.map((filePath) => {
+    const statuses = filePaths.map((filePath) => {
       const abs = resolve(filePath);
       /** @type {import('../vcStatus.js').VCFileStatus} */
       const status = { filePath: abs, system: 'perforce', writable: writableBit(abs) };
@@ -630,6 +750,9 @@ function buildPerforceStatuses(output, filePaths) {
         // fstat returned nothing for it: outside the client view / unknown to p4.
         status.tracked = false;
         status.dirty = false;
+        const where = errors.get(p4PathKey(abs));
+        if (where === 'outside') status.ignored = true;
+        else if (where === 'unknown') inViewUntracked.push(status);
         return status;
       }
 
@@ -638,6 +761,8 @@ function buildPerforceStatuses(output, filePaths) {
       const deletedAtHead = headAction === 'delete' || headAction === 'move/delete';
       const openedByMe = has('action');
       status.tracked = (has('headRev') || has('depotFile')) && (!deletedAtHead || openedByMe);
+      if (status.tracked) status.ignored = false;
+      else inViewUntracked.push(status);
       if (openedByMe || has('ourLock')) status.openedByMe = true;
       // Opened in a pending changelist (edit/add/delete) = pending local change.
       // A file changed on disk without being opened is not detected here.
@@ -656,6 +781,7 @@ function buildPerforceStatuses(output, filePaths) {
       if (headRev > haveRev && !deletedAtHead) status.outOfDate = true;
       return status;
     });
+    return { statuses, inViewUntracked };
 }
 
 /**
@@ -677,7 +803,8 @@ export function parseZtag(output) {
       current = { fields: new Map(), multi: new Map() };
       records.push(current);
     }
-    const body = line.slice(4);
+    // Per-open fields sit one level down (`... ... otherOpen0 bob@bob-ws`).
+    const body = line.replace(/^(\.\.\. )+/, '');
     const space = body.indexOf(' ');
     const field = space === -1 ? body : body.slice(0, space);
     const value = space === -1 ? '' : body.slice(space + 1);

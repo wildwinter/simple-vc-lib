@@ -1,5 +1,5 @@
 import { resolve, dirname } from 'path';
-import { statSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
+import { statSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, unlinkSync } from 'fs';
 import { writeFile, readFile, mkdir } from 'fs/promises';
 import { loadConfig } from './config.js';
 import { okResult, errorResult } from './vcResult.js';
@@ -160,6 +160,32 @@ export function renameFolderAsync(oldPath, newPath) {
 }
 
 /**
+ * A write that created its file and was then refused as `locked` (a Perforce add
+ * refused because another workspace has the path open exclusively), or whose disk
+ * write itself failed part-way, takes the file away again. Left behind, an orphan the
+ * VC does not know about is picked up by the next reconcile, or blocks a later sync
+ * ("can't clobber writable file"). Other failures (a transient git index.lock, a
+ * network blip) keep the file, so its content is not lost. A file that was there
+ * before the write is never removed.
+ *
+ * @param {string} filePath
+ * @param {boolean} created - the file did not exist before this write
+ * @param {import('./vcResult.js').VCResult} result
+ * @param {boolean} [diskWriteFailed]
+ */
+function removeIfCreated(filePath, created, result, diskWriteFailed = false) {
+  if (result.success || !created || !existsSync(filePath)) return result;
+  if (!diskWriteFailed && result.status !== 'locked') return result;
+  try {
+    chmodSync(filePath, 0o666);
+    unlinkSync(filePath);
+    return { ...result, message: `${result.message} (the new file was removed)` };
+  } catch {
+    return result;
+  }
+}
+
+/**
  * Write text to a file, handling VC checkout and registration automatically.
  * Calls `prepareToWrite`, writes the file, then calls `finishedWrite`.
  * Works whether or not the file already exists.
@@ -168,7 +194,9 @@ export function renameFolderAsync(oldPath, newPath) {
  * are performed and the file is not written. Set `forceWrite` to `true` to skip
  * this check and always write.
  *
- * On failure, returns the result from whichever step failed.
+ * On failure, returns the result from whichever step failed. If this write created
+ * the file and `finishedWrite` then refused it as `locked` (or the disk write itself
+ * failed), the file is removed again.
  *
  * @param {string} filePath
  * @param {string} content
@@ -187,14 +215,15 @@ export function writeTextFile(filePath, content, encoding = 'utf8', forceWrite =
   // One resolution for both halves of the write: it is the same question,
   // and asking twice was two directory walks (and once, two `p4 info` spawns).
   const provider = resolveProvider(filePath);
+  const created = !existsSync(filePath);
   const prep = provider.prepareToWrite(filePath);
   if (!prep.success) return prep;
   try {
     writeFileSync(filePath, content, { encoding });
   } catch (e) {
-    return { success: false, status: 'error', message: e.message };
+    return removeIfCreated(filePath, created, { success: false, status: 'error', message: e.message }, true);
   }
-  return provider.finishedWrite(filePath);
+  return removeIfCreated(filePath, created, provider.finishedWrite(filePath));
 }
 
 /**
@@ -206,7 +235,9 @@ export function writeTextFile(filePath, content, encoding = 'utf8', forceWrite =
  * are performed and the file is not written. Set `forceWrite` to `true` to skip
  * this check and always write.
  *
- * On failure, returns the result from whichever step failed.
+ * On failure, returns the result from whichever step failed. If this write created
+ * the file and `finishedWrite` then refused it as `locked` (or the disk write itself
+ * failed), the file is removed again.
  *
  * @param {string} filePath
  * @param {Buffer | Uint8Array} data
@@ -225,14 +256,15 @@ export function writeBinaryFile(filePath, data, forceWrite = false) {
   // One resolution for both halves of the write: it is the same question,
   // and asking twice was two directory walks (and once, two `p4 info` spawns).
   const provider = resolveProvider(filePath);
+  const created = !existsSync(filePath);
   const prep = provider.prepareToWrite(filePath);
   if (!prep.success) return prep;
   try {
     writeFileSync(filePath, data);
   } catch (e) {
-    return { success: false, status: 'error', message: e.message };
+    return removeIfCreated(filePath, created, { success: false, status: 'error', message: e.message }, true);
   }
-  return provider.finishedWrite(filePath);
+  return removeIfCreated(filePath, created, provider.finishedWrite(filePath));
 }
 
 /**
@@ -299,14 +331,15 @@ export async function writeTextFileAsync(filePath, content, encoding = 'utf8', f
   }
   // One resolution for both halves; see the sync twin.
   const provider = resolveProvider(filePath);
+  const created = !existsSync(filePath);
   const prep = await provider.prepareToWriteAsync(filePath);
   if (!prep.success) return prep;
   try {
     await writeFile(filePath, content, { encoding });
   } catch (e) {
-    return { success: false, status: 'error', message: e.message };
+    return removeIfCreated(filePath, created, { success: false, status: 'error', message: e.message }, true);
   }
-  return provider.finishedWriteAsync(filePath);
+  return removeIfCreated(filePath, created, await provider.finishedWriteAsync(filePath));
 }
 
 /**
@@ -328,14 +361,15 @@ export async function writeBinaryFileAsync(filePath, data, forceWrite = false) {
   }
   // One resolution for both halves; see the sync twin.
   const provider = resolveProvider(filePath);
+  const created = !existsSync(filePath);
   const prep = await provider.prepareToWriteAsync(filePath);
   if (!prep.success) return prep;
   try {
     await writeFile(filePath, data);
   } catch (e) {
-    return { success: false, status: 'error', message: e.message };
+    return removeIfCreated(filePath, created, { success: false, status: 'error', message: e.message }, true);
   }
-  return provider.finishedWriteAsync(filePath);
+  return removeIfCreated(filePath, created, await provider.finishedWriteAsync(filePath));
 }
 
 /**
@@ -596,13 +630,14 @@ function writeTextFilesAllOrNothing(files, encoding) {
 
   for (const i of pending) {
     const { filePath, content } = files[i];
+    const created = !existsSync(filePath);
     try {
       writeFileSync(filePath, content, { encoding });
     } catch (e) {
-      results[i] = errorResult('error', e.message);
+      results[i] = outcomeOf(removeIfCreated(filePath, created, errorResult('error', e.message), true));
       continue;
     }
-    results[i] = outcomeOf(resolveProvider(filePath).finishedWrite(filePath));
+    results[i] = outcomeOf(removeIfCreated(filePath, created, resolveProvider(filePath).finishedWrite(filePath)));
   }
   return finishBatch(files, results);
 }
@@ -636,13 +671,14 @@ async function writeTextFilesAllOrNothingAsync(files, encoding) {
 
   for (const i of pending) {
     const { filePath, content } = files[i];
+    const created = !existsSync(filePath);
     try {
       await writeFile(filePath, content, { encoding });
     } catch (e) {
-      results[i] = errorResult('error', e.message);
+      results[i] = outcomeOf(removeIfCreated(filePath, created, errorResult('error', e.message), true));
       continue;
     }
-    results[i] = outcomeOf(await resolveProvider(filePath).finishedWriteAsync(filePath));
+    results[i] = outcomeOf(removeIfCreated(filePath, created, await resolveProvider(filePath).finishedWriteAsync(filePath)));
   }
   return finishBatch(files, results);
 }

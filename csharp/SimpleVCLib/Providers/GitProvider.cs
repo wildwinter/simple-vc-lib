@@ -238,7 +238,7 @@ public class GitProvider : IVCProvider
         CommandRunner.RunAsync("git", ["-C", cwd, ..args], workingDirectory: cwd, trimOutput: trimOutput);
     /// <summary>
     /// Status for a batch of files: per repository root, ONE
-    /// <c>git status --porcelain -z</c> (tracked-ness) plus - only when this repo
+    /// <c>git status --porcelain -z --ignored=matching</c> (tracked-ness and ignored-ness) plus - only when this repo
     /// uses git-lfs file locking AND <paramref name="remote"/> is set - ONE
     /// <c>git lfs locks --verify --json</c> (<c>--verify</c> splits ours vs theirs).
     /// <para>
@@ -277,7 +277,7 @@ public class GitProvider : IVCProvider
         foreach (var (key, files) in groups)
         {
             if (key == "(none)") { ReportGitWritableOnly(files, byInput); continue; }
-            var st = Git(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], key, trimOutput: false);
+            var st = Git(GitStatusArgs(files), key, trimOutput: false);
             var locks = ShouldQueryLfsLocks(key, remote) ? Git(["lfs", "locks", "--verify", "--json"], key) : NoLocks;
             AssembleGitStatuses(files, GitStates(st), GitLocks(locks), byInput);
         }
@@ -309,7 +309,7 @@ public class GitProvider : IVCProvider
         foreach (var (key, files) in groups)
         {
             if (key == "(none)") { ReportGitWritableOnly(files, byInput); continue; }
-            var stTask = GitAsync(["status", "--porcelain", "-z", "--", .. files.Select(f => f.RelKey)], key, trimOutput: false);
+            var stTask = GitAsync(GitStatusArgs(files), key, trimOutput: false);
             var locksTask = ShouldQueryLfsLocks(key, remote)
                 ? GitAsync(["lfs", "locks", "--verify", "--json"], key)
                 : Task.FromResult(NoLocks);
@@ -318,6 +318,15 @@ public class GitProvider : IVCProvider
         }
         return filePaths.Select(p => byInput[p]).ToList();
     }
+
+    /// <summary>
+    /// The porcelain status for one repo's files. <c>--ignored=matching</c> lists ignored
+    /// files as <c>!!</c>, so the same spawn answers Ignored; without it an ignored file
+    /// is simply absent, which reads as tracked and clean. A file inside an ignored folder
+    /// comes back as that folder (<c>!! secret/</c>), which <see cref="IgnoredBy"/> matches.
+    /// </summary>
+    private static string[] GitStatusArgs(List<(string Input, string RelKey)> files) =>
+        ["status", "--porcelain", "-z", "--ignored=matching", "--", .. files.Select(f => f.RelKey)];
 
     /// <summary>Parse one `rev-parse --show-toplevel --show-prefix` result into (root, prefix).</summary>
     private static (string? Root, string Prefix) GitDirInfo(CommandRunner.Result result)
@@ -419,6 +428,18 @@ public class GitProvider : IVCProvider
         return (ours, theirs);
     }
 
+    /// <summary>
+    /// Whether porcelain lists this repo-relative path as ignored: itself (<c>!! a.key</c>),
+    /// or a folder above it that git collapsed (<c>!! secret/</c>).
+    /// </summary>
+    private static bool IgnoredBy(Dictionary<string, string> states, string relKey)
+    {
+        if (states.TryGetValue(relKey, out var own) && own == "!!") return true;
+        foreach (var (path, code) in states)
+            if (code == "!!" && path.EndsWith('/') && relKey.StartsWith(path, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
     /// <summary>Build per-file statuses for one repo's files from its porcelain + lock data.</summary>
     private static void AssembleGitStatuses(List<(string Input, string RelKey)> files,
         Dictionary<string, string> states,
@@ -427,15 +448,19 @@ public class GitProvider : IVCProvider
     {
         foreach (var (input, relKey) in files)
         {
-            // Absent from porcelain = clean & tracked; '??' = untracked; any other code
-            // (M/A/D/R/MM/...) = a tracked file with pending changes.
-            var present = states.TryGetValue(relKey, out var xy);
+            // Absent from porcelain = clean & tracked; '??' = untracked; '!!' (itself or a
+            // folder above it) = ignored; any other code (M/A/D/R/MM/...) = a tracked file
+            // with pending changes.
+            var ignored = IgnoredBy(states, relKey);
+            var code = ignored ? "!!" : states.GetValueOrDefault(relKey);
+            var untracked = code is "??" or "!!";
             byInput[input] = new VCFileStatus(
                 Path.GetFullPath(input), "git", FileStatusHelpers.WritableBit(input),
-                Tracked: !present || xy != "??",
+                Tracked: !untracked,
                 OpenedByMe: locks.Ours.Contains(relKey) ? true : null,
                 LockedBy: locks.Theirs.TryGetValue(relKey, out var owners) ? owners : null,
-                Dirty: present && xy != "??");
+                Dirty: code is not null && !untracked,
+                Ignored: ignored);
         }
     }
 }

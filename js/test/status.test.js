@@ -306,7 +306,8 @@ describe('fileStatus (svn, canned status xml)', () => {
       calls++;
       assert.equal(command, 'svn');
       assert.deepEqual(args.slice(0, 3), ['status', '--xml', '-v']);
-      return { exitCode: 0, output: '', error: '' };
+      // Every file placed, so no second read of their folders is needed.
+      return { exitCode: 0, output: statusXml(entry('/ws/wc/a.txt', 'normal'), entry('/ws/wc/b.txt', 'normal'), entry('/ws/wc/c.txt', 'normal')), error: '' };
     });
     fileStatus(['/ws/wc/a.txt', '/ws/wc/b.txt', '/ws/wc/c.txt']);
     assert.equal(calls, 1);

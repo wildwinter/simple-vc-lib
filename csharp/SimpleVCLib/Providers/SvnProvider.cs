@@ -266,7 +266,7 @@ public partial class SvnProvider : IVCProvider
     private static partial Regex PropsRegex();
 
     private sealed record SvnInfo(
-        bool? Tracked, bool? Dirty,
+        bool? Tracked, bool? Dirty, bool? Ignored,
         bool OpenedByMe = false, IReadOnlyList<string>? LockedBy = null, bool OutOfDate = false);
 
     /// <summary>item values meaning a tracked file with pending local changes.</summary>
@@ -278,7 +278,9 @@ public partial class SvnProvider : IVCProvider
     /// <summary>
     /// Status for a batch of files in ONE <c>svn status --xml -v</c> spawn. <c>-v</c>
     /// lists clean versioned files too (item="normal"), so tracked-clean is
-    /// distinguished from untracked; <c>--xml</c> is the stable machine format.
+    /// distinguished from untracked; <c>--xml</c> is the stable machine format. svn names
+    /// a file inside an ignored folder only as "not found", so when any file goes unplaced
+    /// a second <c>svn status --depth empty</c> over the folders above it answers Ignored.
     /// <para>
     /// With <paramref name="remote"/> = true it adds <c>-u</c>, a server round-trip that
     /// makes svn emit a <c>&lt;repos-status&gt;</c> per entry: <c>item != "none"</c> means
@@ -287,14 +289,76 @@ public partial class SvnProvider : IVCProvider
     /// (<c>OpenedByMe</c>); a server lock without it is someone else's (<c>LockedBy</c>).
     /// </para>
     /// </summary>
-    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths, bool remote = false) =>
-        BuildSvnStatuses(Svn(SvnStatusArgs(filePaths, remote)).Output, filePaths);
+    public IReadOnlyList<VCFileStatus> Status(IReadOnlyList<string> filePaths, bool remote = false)
+    {
+        var statuses = BuildSvnStatuses(Svn(SvnStatusArgs(filePaths, remote)).Output, filePaths);
+        if (!statuses.Any(NeedsAncestors)) return statuses;
+        return ApplySvnAncestors(statuses, Svn(SvnAncestorArgs(statuses)).Output);
+    }
 
-    /// <summary>Async twin of <see cref="Status"/>: one <c>svn status --xml</c>, awaited.</summary>
+    /// <summary>Async twin of <see cref="Status"/>: the same <c>svn status --xml</c> reads, awaited.</summary>
     public async Task<IReadOnlyList<VCFileStatus>> StatusAsync(IReadOnlyList<string> filePaths, bool remote = false)
     {
         var result = await SvnAsync(SvnStatusArgs(filePaths, remote)).ConfigureAwait(false);
-        return BuildSvnStatuses(result.Output, filePaths);
+        var statuses = BuildSvnStatuses(result.Output, filePaths);
+        if (!statuses.Any(NeedsAncestors)) return statuses;
+        var ancestors = await SvnAsync(SvnAncestorArgs(statuses)).ConfigureAwait(false);
+        return ApplySvnAncestors(statuses, ancestors.Output);
+    }
+
+    /// <summary>
+    /// One <c>svn status --xml -v --depth empty</c> over every folder above the files the
+    /// first read could not place (svn reports a file inside an ignored or unversioned
+    /// folder only as "node not found"), so their folders can answer.
+    /// </summary>
+    private static string[] SvnAncestorArgs(IReadOnlyList<VCFileStatus> statuses)
+    {
+        var dirs = statuses.Where(NeedsAncestors).SelectMany(s => AncestorsOf(s.FilePath)).Distinct().ToArray();
+        return ["status", "--xml", "-v", "--depth", "empty", .. dirs];
+    }
+
+    /// <summary>
+    /// A status the first read could not place, for a file that exists inside a working
+    /// copy. A file not yet written, or one outside any working copy, costs no second read.
+    /// </summary>
+    private static bool NeedsAncestors(VCFileStatus s) =>
+        s.Tracked is null && File.Exists(s.FilePath) && AncestorsOf(s.FilePath).Count > 0;
+
+    /// <summary>
+    /// The folders above a path, nearest first, up to and including the working-copy root
+    /// (the first folder holding <c>.svn</c>). Empty when no folder above has one.
+    /// </summary>
+    private static List<string> AncestorsOf(string filePath)
+    {
+        var dirs = new List<string>();
+        for (var dir = Path.GetDirectoryName(filePath); !string.IsNullOrEmpty(dir); dir = Path.GetDirectoryName(dir))
+        {
+            dirs.Add(dir);
+            if (Directory.Exists(Path.Combine(dir, ".svn"))) return dirs;
+        }
+        return [];
+    }
+
+    /// <summary>
+    /// Place each unresolved file by its nearest folder svn has an entry for: under an
+    /// ignored folder it is ignored; under an unversioned one it is untracked but would be
+    /// picked up by an add of that folder. A versioned nearest folder leaves it unknown.
+    /// </summary>
+    private static IReadOnlyList<VCFileStatus> ApplySvnAncestors(IReadOnlyList<VCFileStatus> statuses, string output)
+    {
+        var (byPath, _) = ParseSvnEntries(output);
+        return statuses.Select(status =>
+        {
+            if (!NeedsAncestors(status)) return status;
+            foreach (var dir in AncestorsOf(status.FilePath))
+            {
+                if (!byPath.TryGetValue(dir, out var info)) continue;
+                return info.Tracked == false
+                    ? status with { Tracked = false, Dirty = false, Ignored = info.Ignored }
+                    : status;
+            }
+            return status;
+        }).ToList();
     }
 
     /// <summary>Build the <c>svn status</c> argument list (adds <c>-u</c> for a remote read).</summary>
@@ -309,23 +373,7 @@ public partial class SvnProvider : IVCProvider
     /// <summary>Assemble per-file statuses from <c>svn status --xml</c> output. Pure.</summary>
     private static IReadOnlyList<VCFileStatus> BuildSvnStatuses(string output, IReadOnlyList<string> filePaths)
     {
-        var byPath = new Dictionary<string, SvnInfo>();
-        var byBase = new Dictionary<string, List<SvnInfo>>();
-        // A bad (non-working-copy) target makes svn exit non-zero, but it still emits
-        // XML for the rest - parse whatever we get and fall back per file.
-        if (output.Length > 0)
-        {
-            foreach (Match entry in EntryRegex().Matches(output))
-            {
-                var entryPath = Path.GetFullPath(DecodeXmlAttr(entry.Groups[1].Value));
-                var info = ParseSvnEntry(entry.Groups[2].Value);
-                if (info is null) continue;
-                byPath[entryPath] = info;
-                var baseName = Path.GetFileName(entryPath);
-                if (!byBase.TryGetValue(baseName, out var list)) byBase[baseName] = list = [];
-                list.Add(info);
-            }
-        }
+        var (byPath, byBase) = ParseSvnEntries(output);
 
         return filePaths.Select(filePath =>
         {
@@ -344,8 +392,32 @@ public partial class SvnProvider : IVCProvider
                 Tracked: info.Tracked, Dirty: info.Dirty,
                 OpenedByMe: info.OpenedByMe ? true : null,
                 LockedBy: info.LockedBy,
-                OutOfDate: info.OutOfDate ? true : null);
+                OutOfDate: info.OutOfDate ? true : null,
+                Ignored: info.Ignored);
         }).ToList();
+    }
+
+    /// <summary>Index the <c>&lt;entry&gt;</c> elements of <c>svn status --xml</c> output by absolute path and by file name.</summary>
+    private static (Dictionary<string, SvnInfo> ByPath, Dictionary<string, List<SvnInfo>> ByBase) ParseSvnEntries(string output)
+    {
+        var byPath = new Dictionary<string, SvnInfo>();
+        var byBase = new Dictionary<string, List<SvnInfo>>();
+        // A bad (non-working-copy) target makes svn exit non-zero, but it still emits
+        // XML for the rest - parse whatever we get and fall back per file.
+        if (output.Length > 0)
+        {
+            foreach (Match entry in EntryRegex().Matches(output))
+            {
+                var entryPath = Path.GetFullPath(DecodeXmlAttr(entry.Groups[1].Value));
+                var info = ParseSvnEntry(entry.Groups[2].Value);
+                if (info is null) continue;
+                byPath[entryPath] = info;
+                var baseName = Path.GetFileName(entryPath);
+                if (!byBase.TryGetValue(baseName, out var list)) byBase[baseName] = list = [];
+                list.Add(info);
+            }
+        }
+        return (byPath, byBase);
     }
 
     /// <summary>
@@ -359,7 +431,7 @@ public partial class SvnProvider : IVCProvider
         var (wcAttrs, wcInner) = wc.Value;
         var item = ItemRegex().Match(wcAttrs) is { Success: true } im ? im.Groups[1].Value : "";
         var props = PropsRegex().Match(wcAttrs) is { Success: true } pm ? pm.Groups[1].Value : "";
-        var (tracked, dirty) = ClassifySvnStatus(item, props);
+        var (tracked, dirty, ignored) = ClassifySvnStatus(item, props);
 
         var openedByMe = false;
         IReadOnlyList<string>? lockedBy = null;
@@ -378,7 +450,7 @@ public partial class SvnProvider : IVCProvider
             if (heldByUs) openedByMe = true;
             else if (owner.Length > 0) lockedBy = [DecodeXmlAttr(owner)];
         }
-        return new SvnInfo(tracked, dirty, openedByMe, lockedBy, outOfDate);
+        return new SvnInfo(tracked, dirty, ignored, openedByMe, lockedBy, outOfDate);
     }
 
     /// <summary>Extract a tag's (attrs, inner) - container form first, then self-closing.</summary>
@@ -390,16 +462,16 @@ public partial class SvnProvider : IVCProvider
     }
 
     /// <summary>
-    /// Map an <c>svn status</c> wc-status (item + props) to tracked / dirty. <c>props</c>
-    /// carries property-only modifications ("modified" / "conflicted").
+    /// Map an <c>svn status</c> wc-status (item + props) to tracked / dirty / ignored.
+    /// <c>props</c> carries property-only modifications ("modified" / "conflicted").
     /// </summary>
-    private static (bool? Tracked, bool? Dirty) ClassifySvnStatus(string item, string props)
+    private static (bool? Tracked, bool? Dirty, bool? Ignored) ClassifySvnStatus(string item, string props)
     {
-        if (SvnUntrackedItems.Contains(item)) return (false, false);
+        if (SvnUntrackedItems.Contains(item)) return (false, false, item == "ignored");
         if (item == "normal" || SvnDirtyItems.Contains(item))
-            return (true, SvnDirtyItems.Contains(item) || props is "modified" or "conflicted");
+            return (true, SvnDirtyItems.Contains(item) || props is "modified" or "conflicted", false);
         // 'external', 'none', or anything unrecognised: can't say.
-        return (null, null);
+        return (null, null, null);
     }
 
     /// <summary>Decode the handful of XML entities svn emits in path attributes.</summary>

@@ -106,6 +106,30 @@ public static class VCLib
         GetProvider(oldPath).RenameFolderAsync(oldPath, newPath);
 
     /// <summary>
+    /// A write that created its file and was then refused as Locked (a Perforce add refused
+    /// because another workspace has the path open exclusively), or whose disk write itself
+    /// failed part-way, takes the file away again. Left behind, an orphan the VC does not
+    /// know about is picked up by the next reconcile, or blocks a later sync ("can't clobber
+    /// writable file"). Other failures (a transient git index.lock, a network blip) keep the
+    /// file, so its content is not lost. A file that was there before is never removed.
+    /// </summary>
+    private static VCResult RemoveIfCreated(string filePath, bool created, VCResult result, bool diskWriteFailed = false)
+    {
+        if (result.Success || !created || !File.Exists(filePath)) return result;
+        if (!diskWriteFailed && result.Status != VCStatus.Locked) return result;
+        try
+        {
+            File.SetAttributes(filePath, FileAttributes.Normal);
+            File.Delete(filePath);
+            return result with { Message = $"{result.Message} (the new file was removed)" };
+        }
+        catch
+        {
+            return result;
+        }
+    }
+
+    /// <summary>
     /// Write text to a file, handling VC checkout and registration automatically.
     /// Calls <see cref="PrepareToWrite"/>, writes the file, then calls <see cref="FinishedWrite"/>.
     /// Works whether or not the file already exists.
@@ -114,7 +138,9 @@ public static class VCLib
     /// operations are performed and the file is not written. Set <paramref name="forceWrite"/>
     /// to <c>true</c> to skip this check and always write.
     /// </para>
-    /// On failure, returns the result from whichever step failed.
+    /// On failure, returns the result from whichever step failed. If this write created the
+    /// file and FinishedWrite then refused it as Locked (or the disk write itself failed),
+    /// the file is removed again.
     /// </summary>
     /// <param name="filePath">Path to write.</param>
     /// <param name="content">Text content to write.</param>
@@ -138,6 +164,7 @@ public static class VCLib
         // One resolution for both halves of the write: it is the same question,
         // and asking twice was two directory walks (and once, two `p4 info` runs).
         var provider = GetProvider(filePath);
+        var created = !File.Exists(filePath);
         var prep = provider.PrepareToWrite(filePath);
         if (!prep.Success) return prep;
         try
@@ -146,9 +173,9 @@ public static class VCLib
         }
         catch (Exception e)
         {
-            return VCResult.Error(e.Message);
+            return RemoveIfCreated(filePath, created, VCResult.Error(e.Message), diskWriteFailed: true);
         }
-        return provider.FinishedWrite(filePath);
+        return RemoveIfCreated(filePath, created, provider.FinishedWrite(filePath));
     }
 
     /// <summary>
@@ -160,7 +187,9 @@ public static class VCLib
     /// operations are performed and the file is not written. Set <paramref name="forceWrite"/>
     /// to <c>true</c> to skip this check and always write.
     /// </para>
-    /// On failure, returns the result from whichever step failed.
+    /// On failure, returns the result from whichever step failed. If this write created the
+    /// file and FinishedWrite then refused it as Locked (or the disk write itself failed),
+    /// the file is removed again.
     /// </summary>
     /// <param name="filePath">Path to write.</param>
     /// <param name="data">Binary data to write.</param>
@@ -182,6 +211,7 @@ public static class VCLib
         // One resolution for both halves of the write: it is the same question,
         // and asking twice was two directory walks (and once, two `p4 info` runs).
         var provider = GetProvider(filePath);
+        var created = !File.Exists(filePath);
         var prep = provider.PrepareToWrite(filePath);
         if (!prep.Success) return prep;
         try
@@ -190,9 +220,9 @@ public static class VCLib
         }
         catch (Exception e)
         {
-            return VCResult.Error(e.Message);
+            return RemoveIfCreated(filePath, created, VCResult.Error(e.Message), diskWriteFailed: true);
         }
-        return provider.FinishedWrite(filePath);
+        return RemoveIfCreated(filePath, created, provider.FinishedWrite(filePath));
     }
     /// <summary>
     /// Write a batch of text files through VC, creating parent directories, and
@@ -258,6 +288,7 @@ public static class VCLib
         }
         // One resolution for both halves; see the sync twin.
         var provider = GetProvider(filePath);
+        var created = !File.Exists(filePath);
         var prep = await provider.PrepareToWriteAsync(filePath).ConfigureAwait(false);
         if (!prep.Success) return prep;
         try
@@ -266,9 +297,9 @@ public static class VCLib
         }
         catch (Exception e)
         {
-            return VCResult.Error(e.Message);
+            return RemoveIfCreated(filePath, created, VCResult.Error(e.Message), diskWriteFailed: true);
         }
-        return await provider.FinishedWriteAsync(filePath).ConfigureAwait(false);
+        return RemoveIfCreated(filePath, created, await provider.FinishedWriteAsync(filePath).ConfigureAwait(false));
     }
 
     /// <summary>Async twin of <see cref="WriteBinaryFile"/>.</summary>
@@ -285,6 +316,7 @@ public static class VCLib
         }
         // One resolution for both halves; see the sync twin.
         var provider = GetProvider(filePath);
+        var created = !File.Exists(filePath);
         var prep = await provider.PrepareToWriteAsync(filePath).ConfigureAwait(false);
         if (!prep.Success) return prep;
         try
@@ -293,9 +325,9 @@ public static class VCLib
         }
         catch (Exception e)
         {
-            return VCResult.Error(e.Message);
+            return RemoveIfCreated(filePath, created, VCResult.Error(e.Message), diskWriteFailed: true);
         }
-        return await provider.FinishedWriteAsync(filePath).ConfigureAwait(false);
+        return RemoveIfCreated(filePath, created, await provider.FinishedWriteAsync(filePath).ConfigureAwait(false));
     }
 
     /// <summary>
@@ -603,16 +635,17 @@ public static class VCLib
         foreach (var i in pending)
         {
             var file = files[i];
+            var created = !File.Exists(file.FilePath);
             try
             {
                 File.WriteAllText(file.FilePath, file.Content, enc);
             }
             catch (Exception e)
             {
-                results[i] = VCResult.Error(e.Message);
+                results[i] = RemoveIfCreated(file.FilePath, created, VCResult.Error(e.Message), diskWriteFailed: true);
                 continue;
             }
-            results[i] = GetProvider(file.FilePath).FinishedWrite(file.FilePath);
+            results[i] = RemoveIfCreated(file.FilePath, created, GetProvider(file.FilePath).FinishedWrite(file.FilePath));
         }
         return FinishBatch(files, results);
     }
@@ -645,16 +678,18 @@ public static class VCLib
         foreach (var i in pending)
         {
             var file = files[i];
+            var created = !File.Exists(file.FilePath);
             try
             {
                 await File.WriteAllTextAsync(file.FilePath, file.Content, enc).ConfigureAwait(false);
             }
             catch (Exception e)
             {
-                results[i] = VCResult.Error(e.Message);
+                results[i] = RemoveIfCreated(file.FilePath, created, VCResult.Error(e.Message), diskWriteFailed: true);
                 continue;
             }
-            results[i] = await GetProvider(file.FilePath).FinishedWriteAsync(file.FilePath).ConfigureAwait(false);
+            results[i] = RemoveIfCreated(file.FilePath, created,
+                await GetProvider(file.FilePath).FinishedWriteAsync(file.FilePath).ConfigureAwait(false));
         }
         return FinishBatch(files, results);
     }

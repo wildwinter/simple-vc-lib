@@ -392,10 +392,12 @@ function buildPlasticBase(result, filePaths) {
     if (info) {
       status.tracked = info.tracked;
       status.dirty = info.dirty;
+      status.ignored = info.ignored;
     } else if (existsSync(abs)) {
       // Not listed by `cm status --all --ignored` = controlled, no pending change.
       status.tracked = true;
       status.dirty = false;
+      status.ignored = false;
     }
     return status;
   });

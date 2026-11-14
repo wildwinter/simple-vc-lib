@@ -43,6 +43,7 @@ public class PerforceProvider : IVCProvider
             return ReopenAfterPendingDelete(filePath, fstat, action);
 
         var result = P4(["edit", filePath]);
+        if (ExclusiveRefusal(filePath, result) is { } refused) return refused;
         if (result.ExitCode == 0) return VCResult.Ok();
 
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
@@ -74,6 +75,7 @@ public class PerforceProvider : IVCProvider
         if (IsInDepotFstat(fstat)) return VCResult.Ok();
 
         var result = P4(["add", filePath]);
+        if (ExclusiveRefusal(filePath, result) is { } refused) return refused;
         if (result.ExitCode == 0) return VCResult.Ok("File opened for add in Perforce");
         // File is ignored (e.g. matches a .p4ignore pattern) — treat as outside the depot.
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
@@ -95,6 +97,7 @@ public class PerforceProvider : IVCProvider
             return await ReopenAfterPendingDeleteAsync(filePath, fstat, action).ConfigureAwait(false);
 
         var result = await P4Async(["edit", filePath]).ConfigureAwait(false);
+        if (ExclusiveRefusal(filePath, result) is { } refused) return refused;
         if (result.ExitCode == 0) return VCResult.Ok();
 
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
@@ -123,6 +126,7 @@ public class PerforceProvider : IVCProvider
         if (IsInDepotFstat(fstat)) return VCResult.Ok();
 
         var result = await P4Async(["add", filePath]).ConfigureAwait(false);
+        if (ExclusiveRefusal(filePath, result) is { } refused) return refused;
         if (result.ExitCode == 0) return VCResult.Ok("File opened for add in Perforce");
         var combined = $"{result.Output} {result.Error}".ToLowerInvariant();
         if (combined.Contains("ignored")) return await _fs.FinishedWriteAsync(filePath).ConfigureAwait(false);
@@ -155,6 +159,47 @@ public class PerforceProvider : IVCProvider
         return RevertResult(filePath, await P4Async(["revert", "-a", filePath]).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// A refusal under an exclusive (+l) filetype: someone else already has the file open.
+    /// p4 reports it at exit 0 ("can't edit exclusive file already opened for edit", then
+    /// "... also opened by bob@bob-ws"), so it must be read from the text. Returns a
+    /// Locked result naming the holders, or null if this is not that refusal.
+    /// </summary>
+    private static VCResult? ExclusiveRefusal(string filePath, CommandRunner.Result result)
+    {
+        var combined = $"{result.Output}\n{result.Error}";
+        if (!ExclusiveRefusalRegex.IsMatch(combined)) return null;
+        var holders = AlsoOpenedByRegex.Matches(combined).Select(m => m.Groups[1].Value).ToList();
+        return VCResult.Failure(VCStatus.Locked, $"'{filePath}' is exclusively opened by {HoldersText(holders)}");
+    }
+
+    private static readonly Regex ExclusiveRefusalRegex =
+        new(@"can't \w+ exclusive file already opened", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex AlsoOpenedByRegex =
+        new(@"also opened by (\S+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex HeadTypeRegex = new(@"^\.\.\. headType (\S+)", RegexOptions.Multiline | RegexOptions.Compiled);
+    private static readonly Regex OtherOpenRegex = new(@"^(?:\.\.\. )+otherOpen\d+ (\S+)", RegexOptions.Multiline | RegexOptions.Compiled);
+    private static readonly Regex ExclusiveTypeRegex = new(@"\+\w*l", RegexOptions.Compiled);
+
+    /// <summary>
+    /// True when fstat shows an exclusive (+l) file that another workspace has open, so an
+    /// edit or delete here would be refused. <c>p4 fstat</c> nests the other opens one level
+    /// down (<c>... ... otherOpen0 bob@bob-ws</c>).
+    /// </summary>
+    private static bool ExclusivelyOpenedElsewhere(string? fstat)
+    {
+        if (fstat is null) return false;
+        var type = HeadTypeRegex.Match(fstat) is { Success: true } m ? m.Groups[1].Value : "";
+        return ExclusiveTypeRegex.IsMatch(type) && OtherOpeners(fstat).Count > 0;
+    }
+
+    /// <summary>The holders fstat lists in <c>otherOpenN</c>.</summary>
+    private static List<string> OtherOpeners(string? fstat) =>
+        fstat is null ? [] : OtherOpenRegex.Matches(fstat).Select(m => m.Groups[1].Value).ToList();
+
+    private static string HoldersText(List<string> holders) =>
+        holders.Count > 0 ? string.Join(", ", holders) : "another user";
+
     /// <summary>The result of the <c>p4 revert -a</c> that undoes a batch checkout.</summary>
     private static VCResult RevertResult(string filePath, CommandRunner.Result result) =>
         result.ExitCode == 0
@@ -176,6 +221,11 @@ public class PerforceProvider : IVCProvider
         // stale entry would abort the eventual submit and leave it locked.
         var fstat = Fstat(filePath);
         var action = PendingAction(fstat);
+
+        // An exclusive file open in another workspace: `p4 delete` would be refused
+        // (at exit 0), after the local copy had already gone. Leave everything alone.
+        if (action is null && ExclusivelyOpenedElsewhere(fstat))
+            return VCResult.Failure(VCStatus.Locked, $"'{filePath}' is exclusively opened by {HoldersText(OtherOpeners(fstat))}");
 
         // Open for add (never submitted): there is nothing in the depot to delete.
         // `p4 delete` would only warn (exit 0) and leave the add pending, so
@@ -214,6 +264,7 @@ public class PerforceProvider : IVCProvider
             var localError = RemoveLocal(filePath);
             if (localError is not null) return localError;
             var result = P4(["delete", filePath]);
+            if (ExclusiveRefusal(filePath, result) is { } refused) return refused;
             if (result.ExitCode != 0)
                 return VCResult.Error($"Cannot delete '{filePath}' from Perforce: {result.Error ?? result.Output}");
             return VCResult.Ok();
@@ -463,7 +514,16 @@ public class PerforceProvider : IVCProvider
             CopyDirectory(dir, Path.Combine(dst, Path.GetFileName(dir)));
     }
     /// <summary>
-    /// Status for a batch of files in ONE <c>p4 -ztag fstat</c> spawn.
+    /// Status for a batch of files in ONE <c>p4 -ztag fstat</c> spawn, plus one
+    /// <c>p4 ignores -i</c> over any untracked files that are in the client view.
+    /// <para>
+    /// Ignored follows what <c>p4 add</c> / <c>p4 reconcile</c> would do. fstat's per-file
+    /// errors say which paths are in view: "no such file(s)" is mapped but not in the depot;
+    /// "not in client view" or "not under client's root" is a path p4 will never pick up, so
+    /// it counts as ignored. That is the view, not the root, which matters because a client
+    /// root is often a whole home folder. In-view untracked files are then checked against
+    /// P4IGNORE in the one <c>p4 ignores</c> call.
+    /// </para>
     /// <para>
     /// Tracked-ness follows the same rules as the write path: workspace-mapped is
     /// not depot-tracked; deleted-at-head is untracked unless currently reopened.
@@ -475,22 +535,82 @@ public class PerforceProvider : IVCProvider
     {
         // remote is ignored: p4 fstat is already a server call carrying lock/staleness.
         _ = remote;
-        var result = P4(["-ztag", "fstat", .. filePaths]);
-        return BuildPerforceStatuses(result.Output, filePaths);
+        var result = P4(["-ztag", "fstat", .. filePaths.Select(Path.GetFullPath)]);
+        var (statuses, inViewUntracked) = BuildPerforceStatuses(result, filePaths);
+        if (inViewUntracked.Count == 0) return statuses;
+        return ApplyP4Ignores(statuses, inViewUntracked, P4(P4IgnoresArgs(statuses, inViewUntracked)));
     }
 
     /// <summary>Async twin of <see cref="Status"/>: one <c>p4 -ztag fstat</c>, awaited.</summary>
     public async Task<IReadOnlyList<VCFileStatus>> StatusAsync(IReadOnlyList<string> filePaths, bool remote = false)
     {
         _ = remote;
-        var result = await P4Async(["-ztag", "fstat", .. filePaths]).ConfigureAwait(false);
-        return BuildPerforceStatuses(result.Output, filePaths);
+        var result = await P4Async(["-ztag", "fstat", .. filePaths.Select(Path.GetFullPath)]).ConfigureAwait(false);
+        var (statuses, inViewUntracked) = BuildPerforceStatuses(result, filePaths);
+        if (inViewUntracked.Count == 0) return statuses;
+        var ignores = await P4Async(P4IgnoresArgs(statuses, inViewUntracked)).ConfigureAwait(false);
+        return ApplyP4Ignores(statuses, inViewUntracked, ignores);
     }
 
-    /// <summary>Assemble per-file statuses from one <c>p4 -ztag fstat</c> output. Pure.</summary>
-    private static IReadOnlyList<VCFileStatus> BuildPerforceStatuses(string output, IReadOnlyList<string> filePaths)
+    /// <summary><c>p4 ignores -i</c> over untracked files in the client view.</summary>
+    private static string[] P4IgnoresArgs(List<VCFileStatus> statuses, List<int> indexes) =>
+        ["ignores", "-i", .. indexes.Select(i => statuses[i].FilePath)];
+
+    /// <summary>
+    /// Apply one <c>p4 ignores -i &lt;paths&gt;</c> result: it prints <c>&lt;path&gt; ignored</c>
+    /// for each path the ignore rules match, and nothing for the rest. A failed run leaves
+    /// them unknown.
+    /// </summary>
+    private static List<VCFileStatus> ApplyP4Ignores(List<VCFileStatus> statuses, List<int> indexes, CommandRunner.Result result)
     {
+        if (result.ExitCode != 0) return statuses;
+        var ignored = new HashSet<string>(P4PathComparer);
+        foreach (var line in result.Output.Split('\n'))
+            if (P4IgnoredLineRegex.Match(line.TrimEnd('\r')) is { Success: true } m)
+                ignored.Add(Path.GetFullPath(m.Groups[1].Value));
+        foreach (var i in indexes)
+            statuses[i] = statuses[i] with { Ignored = ignored.Contains(statuses[i].FilePath) };
+        return statuses;
+    }
+
+    /// <summary>Matching what p4 echoes: case-insensitive on Windows.</summary>
+    private static readonly StringComparer P4PathComparer =
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
+    private static readonly Regex P4IgnoredLineRegex = new(@"^(.+) ignored\s*$", RegexOptions.Compiled);
+    private static readonly Regex NotUnderRootRegex = new(@"^Path '(.+)' is not under client's root", RegexOptions.Compiled);
+    private static readonly Regex NotInViewRegex = new(@"^(.+?) - file\(s\) not in client view\.?\s*$", RegexOptions.Compiled);
+    private static readonly Regex NoSuchFileRegex = new(@"^(.+?) - no such file\(s\)\.?\s*$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Paths fstat's per-file errors place, from its stderr: false ("in view") for "no such
+    /// file(s)" (mapped, not in the depot), true ("outside") for "not in client view" and
+    /// "not under client's root".
+    /// </summary>
+    private static Dictionary<string, bool> FstatErrorPaths(string error)
+    {
+        var outside = new Dictionary<string, bool>(P4PathComparer);
+        foreach (var raw in error.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            if (NotUnderRootRegex.Match(line) is { Success: true } a) outside[Path.GetFullPath(a.Groups[1].Value)] = true;
+            else if (NotInViewRegex.Match(line) is { Success: true } b) outside[Path.GetFullPath(b.Groups[1].Value)] = true;
+            else if (NoSuchFileRegex.Match(line) is { Success: true } c) outside[Path.GetFullPath(c.Groups[1].Value)] = false;
+        }
+        return outside;
+    }
+
+    /// <summary>
+    /// Assemble per-file statuses from one <c>p4 -ztag fstat</c> result. Pure. Also returns
+    /// the indexes of untracked files in the client view, for the <c>p4 ignores</c> pass.
+    /// </summary>
+    private static (List<VCFileStatus> Statuses, List<int> InViewUntracked) BuildPerforceStatuses(
+        CommandRunner.Result result, IReadOnlyList<string> filePaths)
+    {
+        var output = result.Output;
         var records = output.Length > 0 ? ParseZtag(output) : new List<ZtagRecord>();
+        var errors = FstatErrorPaths(result.Error);
+        var inViewUntracked = new List<int>();
 
         var byClientFile = new Dictionary<string, ZtagRecord>();
         foreach (var record in records)
@@ -507,7 +627,13 @@ public class PerforceProvider : IVCProvider
             if (!byClientFile.TryGetValue(abs, out var record))
             {
                 // fstat returned nothing for it: outside the client view / unknown to p4.
-                statuses.Add(new VCFileStatus(abs, "perforce", writable, Tracked: false, Dirty: false));
+                bool? ignored = null;
+                if (errors.TryGetValue(abs, out var outside))
+                {
+                    if (outside) ignored = true;
+                    else inViewUntracked.Add(statuses.Count);
+                }
+                statuses.Add(new VCFileStatus(abs, "perforce", writable, Tracked: false, Dirty: false, Ignored: ignored));
                 continue;
             }
 
@@ -525,6 +651,7 @@ public class PerforceProvider : IVCProvider
                         : record.Fields.ContainsKey("otherLock") ? otherOpen : new List<string>();
             var lockedBy = holders.Count > 0 ? holders : otherOpen;
 
+            if (!tracked) inViewUntracked.Add(statuses.Count);
             _ = int.TryParse(record.Fields.GetValueOrDefault("haveRev", "0"), out var haveRev);
             _ = int.TryParse(record.Fields.GetValueOrDefault("headRev", "0"), out var headRev);
 
@@ -536,9 +663,10 @@ public class PerforceProvider : IVCProvider
                 OutOfDate: headRev > haveRev && !deletedAtHead ? true : null,
                 // Opened in a pending changelist (edit/add/delete) = pending local change.
                 // A file changed on disk without being opened is not detected here.
-                Dirty: openedByMe));
+                Dirty: openedByMe,
+                Ignored: tracked ? false : null));
         }
-        return statuses;
+        return (statuses, inViewUntracked);
     }
 
     internal sealed record ZtagRecord(Dictionary<string, string> Fields, Dictionary<string, List<string>> Multi);
@@ -565,7 +693,9 @@ public class PerforceProvider : IVCProvider
                 current = new ZtagRecord(new Dictionary<string, string>(), new Dictionary<string, List<string>>());
                 records.Add(current);
             }
-            var body = line[4..];
+            // Per-open fields sit one level down (`... ... otherOpen0 bob@bob-ws`).
+            var body = line;
+            while (body.StartsWith("... ", StringComparison.Ordinal)) body = body[4..];
             var space = body.IndexOf(' ');
             var field = space == -1 ? body : body[..space];
             var value = space == -1 ? "" : body[(space + 1)..];

@@ -346,7 +346,7 @@ export class GitProvider {
 
   /**
    * Status for a batch of files: per repository root, ONE
-   * `git status --porcelain -z` (tracked-ness) plus - only when this repo uses
+   * `git status --porcelain -z --ignored=matching` (tracked-ness and ignored-ness) plus - only when this repo uses
    * git-lfs file locking AND `{ remote: true }` was asked - ONE
    * `git lfs locks --verify --json` (`--verify` splits ours vs theirs).
    *
@@ -384,7 +384,7 @@ export class GitProvider {
     const byInput = new Map();
     for (const [root, files] of groups) {
       if (root === '(none)') { reportWritableOnly(files, byInput); continue; }
-      const st = git(['status', '--porcelain', '-z', '--', ...files.map((f) => f.relKey)], root, { trim: false });
+      const st = git(gitStatusArgs(files), root, { trim: false });
       const locks = shouldQueryLfsLocks(root, options) ? git(['lfs', 'locks', '--verify', '--json'], root) : NO_LOCKS;
       assembleGitStatuses(files, gitStates(st), gitLocks(locks), byInput);
     }
@@ -414,7 +414,7 @@ export class GitProvider {
     for (const [root, files] of groups) {
       if (root === '(none)') { reportWritableOnly(files, byInput); continue; }
       const [st, locks] = await Promise.all([
-        gitAsync(['status', '--porcelain', '-z', '--', ...files.map((f) => f.relKey)], root, { trim: false }),
+        gitAsync(gitStatusArgs(files), root, { trim: false }),
         shouldQueryLfsLocks(root, options)
           ? gitAsync(['lfs', 'locks', '--verify', '--json'], root)
           : Promise.resolve(NO_LOCKS),
@@ -449,6 +449,16 @@ function repoUsesLfsLocks(root) {
   } catch {
     return false; // no .gitattributes (or unreadable) = not a lock-based repo
   }
+}
+
+/**
+ * The porcelain status for one repo's files. `--ignored=matching` lists ignored
+ * files as `!!`, so the same spawn answers `ignored`; without it an ignored file is
+ * simply absent, which reads as tracked and clean. A file inside an ignored folder
+ * comes back as that folder (`!! secret/`), which {@link ignoredBy} matches.
+ */
+function gitStatusArgs(files) {
+  return ['status', '--porcelain', '-z', '--ignored=matching', '--', ...files.map((f) => f.relKey)];
 }
 
 /** Parse one `rev-parse --show-toplevel --show-prefix` result into {root, prefix}. */
@@ -507,19 +517,35 @@ function gitLocks(locks) {
   return { ours, theirs };
 }
 
+/**
+ * Whether porcelain lists this repo-relative path as ignored: itself (`!! a.key`),
+ * or a folder above it that git collapsed (`!! secret/`).
+ */
+function ignoredBy(states, relKey) {
+  if (states.get(relKey) === '!!') return true;
+  for (const [path, code] of states) {
+    if (code === '!!' && path.endsWith('/') && relKey.startsWith(path)) return true;
+  }
+  return false;
+}
+
 /** Build per-file statuses for one repo's files from its porcelain + lock data. */
 function assembleGitStatuses(files, states, { ours, theirs }, byInput) {
   for (const { filePath, abs, relKey } of files) {
-    // Absent from porcelain = clean & tracked; '??' = untracked; any other code
-    // (M/A/D/R/MM/...) = a tracked file with pending changes.
-    const code = states.get(relKey);
+    // Absent from porcelain = clean & tracked; '??' = untracked; '!!' (itself or a
+    // folder above it) = ignored; any other code (M/A/D/R/MM/...) = a tracked file
+    // with pending changes.
+    const ignored = ignoredBy(states, relKey);
+    const code = ignored ? '!!' : states.get(relKey);
+    const untracked = code === '??' || code === '!!';
     /** @type {import('../vcStatus.js').VCFileStatus} */
     const status = {
       filePath: abs,
       system: 'git',
       writable: writableBit(abs),
-      tracked: code !== '??',
-      dirty: code !== undefined && code !== '??',
+      tracked: !untracked,
+      dirty: code !== undefined && !untracked,
+      ignored,
     };
     if (ours.has(relKey)) status.openedByMe = true;
     const owners = theirs.get(relKey);

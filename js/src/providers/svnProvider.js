@@ -1,5 +1,5 @@
 import { existsSync, unlinkSync, rmSync } from 'fs';
-import { basename, dirname, resolve } from 'path';
+import { basename, dirname, resolve, join } from 'path';
 import { runCommand, runCommandAsync } from '../commandRunner.js';
 import { okResult, errorResult } from '../vcResult.js';
 import { writableBit } from '../vcStatus.js';
@@ -300,7 +300,9 @@ export class SvnProvider {
   /**
    * Status for a batch of files in ONE `svn status --xml -v` spawn. `-v` lists
    * clean versioned files too (item="normal"), so tracked-clean is distinguished
-   * from untracked; `--xml` is the stable machine format.
+   * from untracked; `--xml` is the stable machine format. svn names a file inside an
+   * ignored folder only as "not found", so when any file goes unplaced a second
+   * `svn status --depth empty` over the folders above it answers `ignored` for it.
    *
    * With `{ remote: true }` it adds `-u`, a server round-trip that makes svn emit a
    * `<repos-status>` per entry: `item != "none"` means a newer revision exists
@@ -314,13 +316,73 @@ export class SvnProvider {
    */
   status(filePaths, options = {}) {
     const result = svn(svnStatusArgs(filePaths, options));
-    return buildSvnStatuses(result.output, filePaths);
+    const statuses = buildSvnStatuses(result.output, filePaths);
+    const unresolved = unresolvedSvnStatuses(statuses);
+    if (unresolved.length > 0) applySvnAncestors(unresolved, svn(svnAncestorArgs(unresolved)).output);
+    return statuses;
   }
 
-  /** Async twin of {@link status}: one `svn status --xml`, spawned without blocking. */
+  /** Async twin of {@link status}: the same `svn status --xml` reads, spawned without blocking. */
   async statusAsync(filePaths, options = {}) {
     const result = await svnAsync(svnStatusArgs(filePaths, options));
-    return buildSvnStatuses(result.output, filePaths);
+    const statuses = buildSvnStatuses(result.output, filePaths);
+    const unresolved = unresolvedSvnStatuses(statuses);
+    if (unresolved.length > 0) applySvnAncestors(unresolved, (await svnAsync(svnAncestorArgs(unresolved))).output);
+    return statuses;
+  }
+}
+
+/**
+ * Statuses the first read could not place: svn reports no entry for a file inside an
+ * ignored (or unversioned) folder, only "node not found". Their folders can answer.
+ * Only files that exist and sit inside a working copy qualify, so a file not yet
+ * written, or one outside any working copy, costs no second read.
+ */
+function unresolvedSvnStatuses(statuses) {
+  return statuses.filter((s) => s.tracked === undefined && existsSync(s.filePath) && ancestorsOf(s.filePath).length > 0);
+}
+
+/**
+ * One `svn status --xml -v --depth empty` over every folder above the unresolved
+ * files, so a file under an ignored folder can be reported as ignored.
+ */
+function svnAncestorArgs(statuses) {
+  const dirs = new Set();
+  for (const { filePath } of statuses) for (const dir of ancestorsOf(filePath)) dirs.add(dir);
+  return ['status', '--xml', '-v', '--depth', 'empty', ...dirs];
+}
+
+/**
+ * The folders above a path, nearest first, up to and including the working-copy root
+ * (the first folder holding `.svn`). Empty when no folder above has one.
+ */
+function ancestorsOf(filePath) {
+  const dirs = [];
+  for (let dir = dirname(filePath); dir !== dirname(dir); dir = dirname(dir)) {
+    dirs.push(dir);
+    if (existsSync(join(dir, '.svn'))) return dirs;
+  }
+  return [];
+}
+
+/**
+ * Place each unresolved file by its nearest folder svn has an entry for: under an
+ * ignored folder it is ignored; under an unversioned one it is untracked but would be
+ * picked up by an add of that folder. A versioned nearest folder leaves it unknown.
+ */
+function applySvnAncestors(statuses, output) {
+  const { byPath } = parseSvnEntries(output);
+  for (const status of statuses) {
+    for (const dir of ancestorsOf(status.filePath)) {
+      const info = byPath.get(dir);
+      if (!info) continue;
+      if (info.tracked === false) {
+        status.tracked = false;
+        status.dirty = false;
+        status.ignored = info.ignored;
+      }
+      break;
+    }
   }
 }
 
@@ -339,6 +401,38 @@ function svnStatusArgs(filePaths, options) {
  * @returns {import('../vcStatus.js').VCFileStatus[]}
  */
 function buildSvnStatuses(output, filePaths) {
+  const { byPath, byBase } = parseSvnEntries(output);
+
+  return filePaths.map((filePath) => {
+    const abs = resolve(filePath);
+    /** @type {import('../vcStatus.js').VCFileStatus} */
+    const status = { filePath: abs, system: 'svn', writable: writableBit(abs) };
+    let info = byPath.get(abs);
+    if (!info) {
+      // svn may canonicalize the echoed path (symlinked parents); fall back to
+      // a basename match when it is unambiguous.
+      const sameName = byBase.get(basename(abs));
+      if (sameName && sameName.length === 1) info = sameName[0];
+    }
+    if (info) {
+      if (info.tracked !== undefined) status.tracked = info.tracked;
+      if (info.dirty !== undefined) status.dirty = info.dirty;
+      if (info.ignored !== undefined) status.ignored = info.ignored;
+      if (info.openedByMe) status.openedByMe = true;
+      if (info.lockedBy) status.lockedBy = info.lockedBy;
+      if (info.outOfDate) status.outOfDate = true;
+    }
+    return status;
+  });
+}
+
+/**
+ * Index the `<entry>` elements of `svn status --xml` output by absolute path and by
+ * file name.
+ *
+ * @param {string} output
+ */
+function parseSvnEntries(output) {
   const byPath = new Map();
   const byBase = new Map();
   // A bad (non-working-copy) target makes svn exit non-zero, but it still emits
@@ -356,27 +450,7 @@ function buildSvnStatuses(output, filePaths) {
       byBase.get(base).push(info);
     }
   }
-
-  return filePaths.map((filePath) => {
-    const abs = resolve(filePath);
-    /** @type {import('../vcStatus.js').VCFileStatus} */
-    const status = { filePath: abs, system: 'svn', writable: writableBit(abs) };
-    let info = byPath.get(abs);
-    if (!info) {
-      // svn may canonicalize the echoed path (symlinked parents); fall back to
-      // a basename match when it is unambiguous.
-      const sameName = byBase.get(basename(abs));
-      if (sameName && sameName.length === 1) info = sameName[0];
-    }
-    if (info) {
-      if (info.tracked !== undefined) status.tracked = info.tracked;
-      if (info.dirty !== undefined) status.dirty = info.dirty;
-      if (info.openedByMe) status.openedByMe = true;
-      if (info.lockedBy) status.lockedBy = info.lockedBy;
-      if (info.outOfDate) status.outOfDate = true;
-    }
-    return status;
-  });
+  return { byPath, byBase };
 }
 
 /** XML wc-status item values that mean a tracked file with pending local changes. */
@@ -391,7 +465,7 @@ const SVN_UNTRACKED_ITEMS = new Set(['unversioned', 'ignored']);
  * `<repos-status>`, openedByMe / lockedBy / outOfDate.
  *
  * @param {string} body
- * @returns {{tracked?: boolean, dirty?: boolean, openedByMe?: boolean, lockedBy?: string[], outOfDate?: boolean} | null}
+ * @returns {{tracked?: boolean, dirty?: boolean, ignored?: boolean, openedByMe?: boolean, lockedBy?: string[], outOfDate?: boolean} | null}
  */
 function parseSvnEntry(body) {
   const wc = extractTag(body, 'wc-status');
@@ -416,18 +490,18 @@ function parseSvnEntry(body) {
 }
 
 /**
- * Map an `svn status` wc-status (item + props) to tracked / dirty.
+ * Map an `svn status` wc-status (item + props) to tracked / dirty / ignored.
  * `props` carries property-only modifications ("modified" / "conflicted").
  *
  * @param {string} item
  * @param {string} props
- * @returns {{tracked?: boolean, dirty?: boolean}}
+ * @returns {{tracked?: boolean, dirty?: boolean, ignored?: boolean}}
  */
 function classifySvnStatus(item, props) {
-  if (SVN_UNTRACKED_ITEMS.has(item)) return { tracked: false, dirty: false };
+  if (SVN_UNTRACKED_ITEMS.has(item)) return { tracked: false, dirty: false, ignored: item === 'ignored' };
   if (item === 'normal' || SVN_DIRTY_ITEMS.has(item)) {
     const dirty = SVN_DIRTY_ITEMS.has(item) || props === 'modified' || props === 'conflicted';
-    return { tracked: true, dirty };
+    return { tracked: true, dirty, ignored: false };
   }
   // 'external', 'none', or anything unrecognised: can't say.
   return {};

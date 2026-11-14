@@ -109,6 +109,7 @@ An all-in-one helper that calls `prepareToWrite`, writes `content` as text, then
 - If the file already exists and its content matches `content`, **no VCS operations are performed and the file is not rewritten**. This avoids unnecessary checkouts and dirty-file noise in your VC system.
 - Set `forceWrite` to `true` to bypass the content check and always write (default: `false`).
 - Returns the result from whichever step failed, or the result of `finishedWrite` on success.
+- If the write created the file and `finishedWrite` then refused it as `locked` (a Perforce add refused because another workspace has the path open exclusively), or the disk write itself failed, **the new file is removed again**, so no orphan is left for the next reconcile to pick up or for a later sync to trip over. Other failures, such as a transient git `index.lock`, keep the file. A file that existed before the write is never removed, and parent folders the write created are left in place.
 
 #### `writeBinaryFile(filePath, data, forceWrite)`
 An all-in-one helper that calls `prepareToWrite`, writes `data` as raw bytes, then calls `finishedWrite`. Works whether or not the file already exists.
@@ -116,6 +117,7 @@ An all-in-one helper that calls `prepareToWrite`, writes `data` as raw bytes, th
 - If the file already exists and its content matches `data`, **no VCS operations are performed and the file is not rewritten**.
 - Set `forceWrite` to `true` to bypass the content check and always write (default: `false`).
 - Returns the result from whichever step failed, or the result of `finishedWrite` on success.
+- If the write created the file and `finishedWrite` then refused it as `locked` (a Perforce add refused because another workspace has the path open exclusively), or the disk write itself failed, **the new file is removed again**, so no orphan is left for the next reconcile to pick up or for a later sync to trip over. Other failures, such as a transient git `index.lock`, keep the file. A file that existed before the write is never removed, and parent folders the write created are left in place.
 
 #### `writeTextFiles(files, encoding, options)`
 Writes a **batch** of `{ filePath, content }` entries through VC in one call, creating parent directories as needed. Each file goes through the same pipeline as `writeTextFile` (checkout if needed → write → add if new, with the unchanged-content short-circuit).
@@ -191,9 +193,10 @@ Custom providers can take part by implementing `undoPrepareToWrite(filePath, bef
 Notifies the library that a file has been written. Use this after writing the file yourself following a `prepareToWrite` call.
 - If the file is newly created (not yet in VC): adds it (`git add`, `p4 add`, `cm add`, `svn add`).
 - If the file was already tracked: no-op.
+- Under Perforce, an add refused because another workspace has an exclusive (`+l`) file open comes back as `locked`, naming who has it.
 
 #### `deleteFile(filePath)`
-Deletes a file, scheduling it for deletion in VC if it is tracked.
+Deletes a file, scheduling it for deletion in VC if it is tracked. Under Perforce, an exclusive (`+l`) file that another workspace has open is left alone and comes back as `locked`.
 
 #### `deleteFolder(folderPath)`
 Deletes a folder and all its contents. Tracked files are scheduled for VC deletion; untracked files are deleted from disk.
@@ -234,6 +237,9 @@ Each result has:
 | `lockedBy` | `string[]?` | Who else has it open or locked, e.g. `bob@bob-ws` |
 | `outOfDate` | `bool?` | A newer revision exists on the server |
 | `dirty` | `bool?` | Has pending local VC changes — a tracked file that is modified / staged / opened / added / deleted but not yet committed. Untracked files are not dirty (they surface via `tracked: false`). The cheap, local notion: it does not detect a file edited outside VC (e.g. a Perforce file made writable and changed without being opened). Absent when the provider can't say |
+| `ignored` | `bool?` | The VC system would leave this untracked file alone: adding it, or its folder (`git add -A`, `p4 reconcile`), would not pick it up. Set by the ignore rules (`.gitignore`, `.p4ignore`, `svn:ignore`, Plastic's `ignore.conf`) and, for Perforce, by a path outside the client view. `false` for a tracked file. Absent when the provider can't say (the filesystem provider, a file outside any working copy) |
+
+To warn before a secret is committed, such as a service-account key inside a project, check `tracked === true || (tracked === false && ignored !== true)`.
 
 **Local by default, server reads opt-in.** `fileStatus` accepts a `remote` option:
 
@@ -255,10 +261,10 @@ one call they must make, so they report it either way (the flag is a no-op for t
 
 | System | How | Depth |
 |---|---|---|
-| **Perforce** | ONE `p4 -ztag fstat` for the whole batch | Full, always: tracked, dirty (opened in a changelist), checkout/lock owners, out-of-date |
-| **Git** | One `git status --porcelain -z` + one `git lfs locks --verify --json` per repository | Full: tracked, dirty, plus lock ownership when git-lfs locking is in use (git itself has no locks) |
-| **Plastic SCM** | ONE `cm status --machinereadable --all --ignored`; with `remote`, plus ONE `cm fileinfo` + `cm whoami` | Local: tracked, dirty. Remote: lockedBy / openedByMe / outOfDate |
-| **SVN** | ONE `svn status --xml -v`; with `remote`, adds `-u` | Local: tracked, dirty. Remote: lockedBy / openedByMe / outOfDate. The writable bit still reflects `svn:needs-lock` workflows |
+| **Perforce** | ONE `p4 -ztag fstat` for the whole batch, plus ONE `p4 ignores -i` when any file is untracked but inside the client view | Full, always: tracked, dirty (opened in a changelist), checkout/lock owners, out-of-date, ignored (by `P4IGNORE`, or outside the client view: the view, not the client root, since roots are often a whole home folder) |
+| **Git** | One `git status --porcelain -z --ignored=matching` + one `git lfs locks --verify --json` per repository | Full: tracked, dirty, ignored, plus lock ownership when git-lfs locking is in use (git itself has no locks) |
+| **Plastic SCM** | ONE `cm status --machinereadable --all --ignored`; with `remote`, plus ONE `cm fileinfo` + `cm whoami` | Local: tracked, dirty, ignored. Remote: lockedBy / openedByMe / outOfDate |
+| **SVN** | ONE `svn status --xml -v`; with `remote`, adds `-u`. Plus ONE `svn status --depth empty` over the folders above any file svn could not place (a file inside an ignored folder) | Local: tracked, dirty, ignored. Remote: lockedBy / openedByMe / outOfDate. The writable bit still reflects `svn:needs-lock` workflows |
 | **Filesystem** | — | Writable bit only |
 
 Path matching is done on repo-relative paths internally, so symlinked locations (such as macOS `/var` → `/private/var` temp directories) report correctly.
@@ -272,7 +278,7 @@ All operations return a result object with three fields:
 | `status` | string/enum | `ok`, `locked`, `outOfDate`, or `error` |
 | `message` | string | Human-readable detail, especially on failure |
 
-`locked` and `outOfDate` are only produced by `prepareToWrite` and `prepareToWriteFiles` (and so the write helpers built on them), for VC systems that support exclusive locking or require syncing before editing.
+`locked` and `outOfDate` are produced by `prepareToWrite` and `prepareToWriteFiles` (and so the write helpers built on them), for VC systems that support exclusive locking or require syncing before editing. Under Perforce, `finishedWrite` and `deleteFile` also return `locked` when another workspace has an exclusive (`+l`) file open.
 
 Two exceptions to the single-result shape: `writeTextFiles` and `prepareToWriteFiles` return `{ success, results }` with one such outcome per file (plus its `filePath`), and `fileStatus` returns the status records described under [Status Reads](#status-reads).
 

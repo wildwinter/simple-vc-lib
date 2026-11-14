@@ -31,6 +31,14 @@ export interface VCFileStatus {
    * outside VC. Undefined when the provider cannot say.
    */
   dirty?: boolean;
+  /**
+   * The VCS would leave this untracked file alone: an add of it, or of its folder
+   * (`git add -A`, `p4 reconcile`), would not pick it up. Set by the ignore rules
+   * (.gitignore, .p4ignore, svn:ignore, ignore.conf) and, for Perforce, by a path
+   * outside the client view. False for a tracked file. Undefined when the provider
+   * cannot say (the filesystem provider, a file outside any working copy).
+   */
+  ignored?: boolean;
 }
 
 /** Options for a status read. */
@@ -263,6 +271,9 @@ export declare function renameFolder(oldPath: string, newPath: string): VCResult
  * Calls prepareToWrite, writes the file, then calls finishedWrite.
  * If the file already exists and its content matches, no VCS operations are
  * performed and the file is not written. Set forceWrite to true to always write.
+ * If this write created the file and finishedWrite then refused it as 'locked' (a
+ * Perforce add refused because someone else has it open), or the disk write itself
+ * failed, the file is removed again. Other failures keep it.
  */
 export declare function writeTextFile(filePath: string, content: string, encoding?: BufferEncoding, forceWrite?: boolean): VCResult;
 
@@ -271,6 +282,9 @@ export declare function writeTextFile(filePath: string, content: string, encodin
  * Calls prepareToWrite, writes the file, then calls finishedWrite.
  * If the file already exists and its content matches, no VCS operations are
  * performed and the file is not written. Set forceWrite to true to always write.
+ * If this write created the file and finishedWrite then refused it as 'locked' (a
+ * Perforce add refused because someone else has it open), or the disk write itself
+ * failed, the file is removed again. Other failures keep it.
  */
 export declare function writeBinaryFile(filePath: string, data: Buffer | Uint8Array, forceWrite?: boolean): VCResult;
 

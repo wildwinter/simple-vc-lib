@@ -16,6 +16,12 @@ import { statSync } from 'fs';
  *   are NOT dirty (they surface via `tracked: false`). This is the cheap, local notion -
  *   it does not detect a file edited outside VC (e.g. a Perforce file made writable and
  *   changed without being opened). Undefined when the provider cannot say.
+ * @property {boolean} [ignored] - The VCS would leave this untracked file alone: an
+ *   add of it, or of its folder (`git add -A`, `p4 reconcile`), would not pick it up.
+ *   Set by the ignore rules (.gitignore, .p4ignore, svn:ignore, ignore.conf) and, for
+ *   Perforce, by a path outside the client view. False for a tracked file. Undefined
+ *   when the provider cannot say (the filesystem provider, a file outside any working
+ *   copy).
  */
 
 /**
